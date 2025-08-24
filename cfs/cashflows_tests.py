@@ -7,15 +7,17 @@ from cfs.cashflows import box_3_tax, initial, INITIAL_BALANCE_DESCRIPTION
 
 class WhenGeneratingCashflows():
 
-    def first_non_initial_cf(self, test_generator,
-                             initial_cfs=((100000, 'starting', 'cash'), (50000, 'starting', 'investments'))):
-        sim = Simulation(start_date=date(2019, 1, 1), end_date=date(2020, 1, 1))
-        sim.add(*initial(initial_cfs))
-        sim.add(*test_generator)
-        sim.run()
-        return next(x for x in sim.cashflows.itertuples() if x.description != INITIAL_BALANCE_DESCRIPTION)
-
     def should_calc_box_3_as_30_percent_of_4_percent(self):
+        # kp: todo: replace initial generator with Accounts with initial balances?
+        initial_cfs = initial([(100000, 'starting', 'cash'), (50000, 'starting', 'investments')])
         box_3 = box_3_tax(('cash', 'investments'), 'cash', 'tax')
-        cf = self.first_non_initial_cf(box_3)
-        expect(cf.amount) == 150000 * 1.2 / 100
+        sim = Simulation(initial_cfs, box_3, start_date=date(2019, 1, 1), end_date=date(2020, 1, 1)).run()
+        expect(sim.accounts['tax']) == 150000 * (1.2 / 100)
+        print("=== JOURNALS ===")
+        print(sim.accounts.journals)
+        print("=== POSTINGS ===")
+        print(sim.accounts.postings)
+        print("=== BALANCES THRU TIME ===")
+        print(sim.accounts.balances_by_date)
+        print("=== FINAL BALANCES ===")
+        print(sim.accounts.current_balances)

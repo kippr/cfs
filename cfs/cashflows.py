@@ -8,11 +8,12 @@ logger = logging.getLogger('cashflows')
 
 INITIAL_BALANCE_DESCRIPTION = 'Initial balance'
 def initial(initial_cfs):
+    #kp: to: better way to do this?
     """ Yield 'starting balances' from passed initial_cfs, which should take form of:
         ((amount, from_acct, to_acct), ..)"""
-    async def initial_cashflows(clock, balances):
+    async def initial_cashflows(sim):
         for amount, from_acct, to_acct in initial_cfs:
-            yield amount, from_acct, to_acct, INITIAL_BALANCE_DESCRIPTION
+            yield sim.cf(amount, from_acct, to_acct, INITIAL_BALANCE_DESCRIPTION)
     yield initial_cashflows
 
 
@@ -24,23 +25,23 @@ def amortizing_loan(principal=None, rate=None, years=None, amort_years=None,
 
     @assert_accounts(payment_acct, principal_acct)
     async def amortizing_loan_principal_cfs(clock, balances):
-        yield principal, principal_acct, payment_acct, 'Initial loan'
+        yield sim.cf(principal, principal_acct, payment_acct, 'Initial loan draw')
         await clock.tick(years=1, days=-1)
         for period in range(years - 1):
             amortization_payment = amort_schedule[period]
             yield amortization_payment, payment_acct, principal_acct, 'Amortization payment'
             await clock.tick(years=1)
         amortization_payment = amort_schedule[period + 1]
-        yield amortization_payment, payment_acct, principal_acct, 'Amortization payment'
+        yield sim.cf(amortization_payment, payment_acct, principal_acct, 'Amortization payment')
         await clock.tick(days=1)
-        yield balances[principal_acct] * -1, payment_acct, principal_acct, 'Paydown'
+        yield sim.cf(balances[principal_acct] * -1, payment_acct, principal_acct, 'Paydown')
 
     @assert_accounts(payment_acct, interest_acct)
     async def amortizing_loan_interest_cfs(clock, balances):
         await clock.tick(years=1, days=-1)
         for period in range(years):
             interest_payment = int_schedule[period]
-            yield interest_payment, payment_acct, interest_acct, 'Interest payment'
+            yield sim.cf(interest_payment, payment_acct, interest_acct, 'Interest payment')
             await clock.tick(years=1)
     yield amortizing_loan_principal_cfs
     yield amortizing_loan_interest_cfs
@@ -77,15 +78,15 @@ def bv_pay_retained_earnings_as_dividend(retained_earnings_acct, tax_acct, perso
 
 
 def box_3_tax(net_worth_accts_or_filter, pers_cash_act, pers_tax_acct):
-    async def box_3_tax(clock, balances):
+    async def box_3_tax(sim):
         while True:
-            await clock.next_calendar_year_end()
+            await sim.clock.next_calendar_year_end()
             if callable(net_worth_accts_or_filter):
-                net_worth_accts = filter(net_worth_accts_or_filter, balances.accounts)
+                net_worth_accts = filter(net_worth_accts_or_filter, sim.accts.accounts)
                 logger.debug(list(net_worth_accts))
             else:
                 net_worth_accts = net_worth_accts_or_filter
-            net_worth = balances.sum(net_worth_accts)
+            net_worth = sim.accts.sum(net_worth_accts)
             if net_worth and net_worth > 0:
-                yield net_worth * 0.3 * 0.04, pers_cash_act, pers_tax_acct, f'Box 3 payment on net worth of {net_worth:.2f}'
+                yield sim.cf(net_worth * 0.3 * 0.04, pers_cash_act, pers_tax_acct, f'Box 3 payment on net worth of {net_worth:.2f}')
     yield box_3_tax

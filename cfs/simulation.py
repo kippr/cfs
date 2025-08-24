@@ -16,7 +16,6 @@ class Simulation(object):
     be nice to look at asyncio to use coroutines to interleave these things rather than magic yield statements
     (and needing to use yield from)?
     """
-    cashflows = None
     id_fountain = None
     last_period = None
 
@@ -25,16 +24,16 @@ class Simulation(object):
         self.logger = self._logger(self.__class__, 'Main')
         self.start_date, self.current_period, self.end_date = start_date, start_date, end_date
         # kp: todo: kill cashflow_generators from param list?
-        self.generators = tuple(cashflow_generators)
+        self.generators = tuple(g for cfg in cashflow_generators for g in cfg)
 
     def add(self, *cashflow_generators):
         self.generators = self.generators + tuple(cashflow_generators)
 
     def _prepare_run(self):
-        if self.cashflows is not None:
+        if self.id_fountain is not None:
             raise GeneratorExhausted("Simulation already run?")
-        self.cashflows = cashflows_df([])
-        self.id_fountain = iter(range(10000000000))
+        self.id_fountain = iter(range(1, 10000000000))
+        self.accounts = Accounts()
         self.last_period = False
         self.generators = tuple(self._setup_generators())
         self.logger.info("Initialized cashflow generators: %s",
@@ -75,7 +74,7 @@ class Simulation(object):
                         g.logger.error(msg)
                         raise InvalidCashFlowYielded(msg)
 
-    def _advance_period(self, must_advance):
+    def _maybe_advance_period(self, must_advance):
         if not self.generators:
             raise StopSimulation('All cashflow generators exhausted. Stopping simulation')
         new_period = min((g.clock.waiting_for for g in self.generators if g.clock.waiting_for))
@@ -83,6 +82,7 @@ class Simulation(object):
             raise StopSimulation( "No cashflows this period and no generator waiting for future period.. stopping early")
         if self.current_period == new_period:
             self.logger.trace("Staying on %s to check for more cashflows", self.current_period)
+            return False
         else:
             if self.last_period:
                 raise StopSimulation("Was on last period and advance requested: stopping.")
@@ -94,44 +94,26 @@ class Simulation(object):
                 raise StopSimulation("Advanced past *last* period (%s), stopping", self.end_date)
             else:
                 self.logger.info("Advancing to %s", self.current_period)
-
-    @property
-    def current_balances(self):
-        cf = self._exploded_cashflows
-        if self.current_period:
-            cf = cf.loc[cf['date'] < self.current_period]
-        return cf.groupby('acct')['amount'].sum()
-
-    @property
-    def balances(self):
-        bals = self._exploded_cashflows[['date', 'acct', 'amount']].groupby(['date', 'acct'])
-        return bals.sum().unstack().fillna(0).cumsum()['amount']
+            return True
 
     def run(self):
         self._prepare_run()
+        cfs_for_period = []
         while True:
-            period_cashflows = cashflows_df(self._period_cashflows())
-            must_advance = len(period_cashflows) == 0
-            self._append_cashflows(period_cashflows)
+            for cf in self._period_cashflows():
+                cfs_for_period.append(cf)
             try:
-                self._advance_period(must_advance)
+                period_advanced = self._maybe_advance_period(must_advance=not cfs_for_period)
             except StopSimulation as e:
+                self.accounts.append(cfs_for_period)
                 self.logger.info(str(e))
                 self.current_period = None
                 break
+            else:
+                if period_advanced:
+                    self.accounts.append(cfs_for_period)
+                    cfs_for_period = []
         return self
-
-    def _append_cashflows(self, period_cashflows):
-        self.cashflows = pd.concat([self.cashflows, period_cashflows])
-
-    @property
-    def _exploded_cashflows(self):
-        from_cf = self.cashflows[['date', 'from_acct', 'amount']].copy()
-        from_cf['amount'] = from_cf['amount'] * -1
-        from_cf.columns = ['date', 'acct', 'amount']
-        to_cf = self.cashflows[['date', 'to_acct', 'amount']]
-        to_cf.columns = ['date', 'acct', 'amount']
-        return pd.concat([from_cf, to_cf])
 
     def to_excel(self, filename):
         """ Write data that can be consumed by cashflows-viz.twb """
@@ -235,6 +217,7 @@ class Clock(object):
     @enforce_awaited
     @types.coroutine
     def tick(self, **kwargs):
+        print("Watiging")
         date = self.current_period + relativedelta(**kwargs)
         yield from self.until(date)
 
@@ -284,6 +267,7 @@ def assert_accounts(*registered_accounts):
 
 
 class StrictBalances(object):
+    # kp: todo: review this.. kill it?
 
     def __init__(self, registered_accounts, balances):
         self.registered_accounts = registered_accounts
@@ -311,19 +295,46 @@ class StrictBalances(object):
         return self.balances.accounts
 
 
-class Accounts(object):
+class Accounts():
 
     def __init__(self):
-        pass
+        self._journals = JournalEntries()
 
+    def append(self, period_cashflows):
+        cfs = list(period_cashflows)
+        if cfs:
+            self._journals._append_cashflows(cfs)
+        return bool(cfs)
+
+    @property
+    def current_balances(self):
+        cf = self._journals.postings
+        return cf.groupby('acct')['amount'].sum()
+
+    @property
+    def balances_by_date(self):
+        # kp: todo: what should this be called?
+        bals = self._journals.postings[['date', 'acct', 'amount']].groupby(['date', 'acct'])
+        return bals.sum().unstack().infer_objects().fillna(0).cumsum()['amount']
+
+    @property
+    def journals(self):
+        return self._journals.journals.set_index('txn_id').sort_index()
+
+    @property
+    def postings(self):
+        return self._journals.postings.sort_values('txn_id').set_index('txn_id')
+
+
+    #kp: todo: asking for trouble?
     def __getitem__(self, acct):
         try:
-            return self.simulation.current_balances[acct]
+            return self.current_balances[acct]
         except KeyError:
             return 0
 
-    #kp: todo: how to link account names between generators?
-    def __getattr__(self, acct_name):
+    #kp: todo: asking for trouble?
+    def ___getattr__(self, acct_name):
         return acct_name
 
     def sum(self, accts):
@@ -337,7 +348,26 @@ class Accounts(object):
         return self.current_balances.index.tolist()
 
 
-def cashflows_df(cfs):
+class JournalEntries():
+
+    def __init__(self):
+        self.journals = _journals([])
+
+    def _append_cashflows(self, period_cashflows):
+        period_journals = _journals(period_cashflows)
+        self.journals = pd.concat([self.journals, period_journals])
+
+    @property
+    def postings(self):
+        from_acct = self.journals[['txn_id', 'date', 'from_acct', 'amount', 'description']].copy()
+        from_acct['amount'] = from_acct['amount'] * -1
+        from_acct.columns = ['txn_id', 'date', 'acct', 'amount', 'description']
+        to_acct = self.journals[['txn_id', 'date', 'to_acct', 'amount', 'description']].copy()
+        to_acct.columns = ['txn_id', 'date', 'acct', 'amount', 'description']
+        return pd.concat([from_acct, to_acct]).sort_values(['txn_id', 'acct'])
+
+
+def _journals(cfs):
     return pd.DataFrame(cfs, columns=('txn_id', 'date', 'amount', 'from_acct', 'to_acct', 'description'))
 
 
@@ -391,7 +421,6 @@ class GeneratorState:
     async_gen: any = None
 
 
-GeneratorAttributes = namedtuple('GeneratorAttributes', ('generator', 'iter_cashflows', 'clock', 'logger'))
 CashFlow = namedtuple('CashFlow', ('txn_id', 'current_period', 'amount', 'from_acct', 'to_acct', 'description'))
 
 
