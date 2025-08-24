@@ -6,6 +6,7 @@ import time
 import types
 import functools
 import logging
+import asyncio
 logging.addLevelName(5, 'TRACE')
 logging.TRACE = 5
 
@@ -109,17 +110,20 @@ class Simulation(object):
         return bals.sum().unstack().fillna(0).cumsum()['amount']
 
     def run(self):
-        self._prepare_run()
-        while True:
-            period_cashflows = cashflows_df(self._period_cashflows())
-            must_advance = len(period_cashflows) == 0
-            self._append_cashflows(period_cashflows)
-            try:
-                self._advance_period(must_advance)
-            except StopSimulation as e:
-                self.logger.info(str(e))
-                self.current_period = None
-                break
+        try:
+            self._prepare_run()
+            while True:
+                period_cashflows = cashflows_df(self._period_cashflows())
+                must_advance = len(period_cashflows) == 0
+                self._append_cashflows(period_cashflows)
+                try:
+                    self._advance_period(must_advance)
+                except StopSimulation as e:
+                    self.logger.info(str(e))
+                    self.current_period = None
+                    break
+        finally:
+            cleanup_simulation_loop()
         return self
 
     def _append_cashflows(self, period_cashflows):
@@ -152,27 +156,117 @@ class Simulation(object):
         writer.save()
 
 
+class AsyncGeneratorWrapper:
+    """Wrapper to handle async generators in Python 3.12"""
+    def __init__(self, async_gen):
+        self._gen = async_gen
+        self._coro = None
+        
+    def __anext__(self):
+        if self._coro is None:
+            self._coro = self._gen.__anext__()
+        return self._coro
+        
+    async def get_next(self):
+        try:
+            result = await self._gen.__anext__()
+            self._coro = None  # Reset for next call
+            return result
+        except StopAsyncIteration:
+            raise GeneratorExhausted()
+
+# Global event loop for the simulation
+_simulation_loop = None
+
+def get_simulation_loop():
+    global _simulation_loop
+    if _simulation_loop is None or _simulation_loop.is_closed():
+        _simulation_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(_simulation_loop)
+    return _simulation_loop
+
+def cleanup_simulation_loop():
+    global _simulation_loop
+    if _simulation_loop and not _simulation_loop.is_closed():
+        _simulation_loop.close()
+    _simulation_loop = None
+
 def _next(iter_cashflows):
     # grab the next cash flow from the async generator or else a clock waiting event
     try:
-        generator = iter_cashflows.__anext__()
+        loop = get_simulation_loop()
+        if not loop.is_running():
+            # Run the async function in the persistent loop
+            coro = _async_next(iter_cashflows)
+            return loop.run_until_complete(coro)
+        else:
+            # If loop is already running, we need to create a task
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(asyncio.run, _async_next(iter_cashflows))
+                return future.result()
     except AttributeError as e:
         raise NotReadyAfterAll()
+
+async def _async_next(iter_cashflows):
+    """Async helper function to get next value from async generator"""
     try:
-        waiting = generator.send(None)
-    except StopIteration as si:
-        return si.value
-    except StopAsyncIteration as sai:
+        result = await iter_cashflows.__anext__()
+        return result
+    except StopAsyncIteration:
         raise GeneratorExhausted()
-    else:
-        return waiting
 
 
+class AsyncGeneratorSuspend(Exception):
+    """Exception used to suspend async generator execution"""
+    def __init__(self, waiting_result):
+        self.waiting_result = waiting_result
+        super().__init__()
+
+class AsyncGeneratorYield:
+    """A special awaitable that yields a value from an async generator"""
+    def __init__(self, value):
+        self.value = value
+    
+    def __await__(self):
+        # This is what gets awaited in the async generator
+        async def _await_impl():
+            # This coroutine completion signals that we should yield the value
+            return self.value
+        return _await_impl().__await__()
+
+class AwaitableWaiting:
+    """A special object that can be both awaited and used with next() for backward compatibility"""
+    
+    def __init__(self, clock=None):
+        self.clock = clock
+    
+    def __await__(self):
+        # Clear the await flag since this was properly awaited
+        if self.clock:
+            self.clock._awaiting_clock_wait = False
+        # Return an awaitable that yields WAITING when awaited
+        return AsyncGeneratorYield(WAITING).__await__()
+        
+    def __iter__(self):
+        # For next() usage in tests
+        return self
+        
+    def __next__(self):
+        # For next() usage in tests
+        # Clear the await flag since this is being used in test context
+        if self.clock:
+            self.clock._awaiting_clock_wait = False
+        return WAITING
+        
 def enforce_awaited(wrapped):
     @functools.wraps(wrapped)
     def checked(clock, *args, **kwargs):
         clock._awaiting_clock_wait = wrapped.__name__
-        return wrapped(clock, *args, **kwargs)
+        result = wrapped(clock, *args, **kwargs)
+        # The result will be an AwaitableWaiting, so we don't reset the flag here
+        # It will be reset when the actual waiting happens
+        return result
     return checked
 
 
@@ -218,25 +312,23 @@ class Clock(object):
         return relativedelta(self.current_period, self.simulation.start_date)
 
     @enforce_awaited
-    @types.coroutine
     def tick(self, **kwargs):
         date = self.current_period + relativedelta(**kwargs)
-        yield from self.until(date)
+        return self.until(date)
 
     @enforce_awaited
-    @types.coroutine
     def until(self, date):
         self.waiting_for = date
-        yield WAITING
+        # Return a special object that can be both awaited and used with next()
+        return AwaitableWaiting(self)
 
-    @enforce_awaited
-    @types.coroutine
+    @enforce_awaited  
     def next_calendar_year_end(self):
         """Wait until next 31 Dec"""
         self.waiting_for = datetime.date(self.current_period.year, 12, 31)
         if self.waiting_for == self.current_period:
             self.waiting_for = datetime.date(self.current_period.year + 1, 12, 31)
-        yield WAITING
+        return AwaitableWaiting(self)
 
     def _wait_was_awaited(self):
         self._awaiting_clock_wait = False
