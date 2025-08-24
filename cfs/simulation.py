@@ -1,4 +1,5 @@
 from collections import namedtuple
+from dataclasses import dataclass
 import pandas as pd
 import datetime
 from dateutil.relativedelta import relativedelta
@@ -40,12 +41,12 @@ class Simulation(object):
                          [f'{g.generator.__name__}' for g in self.generators])
 
     def _setup_generators(self):
-        for cashflow_generator in self.generators:
-            clock = Clock(self, cashflow_generator)
-            balances = Balances(self, generator_name=cashflow_generator.__name__)
-            iter_cashflows = cashflow_generator(clock, balances)
-            logger = self._logger(cashflow_generator, 'Cashflows')
-            yield GeneratorAttributes(cashflow_generator, iter_cashflows, clock, balances, logger)
+        for cashflow_generator_fn in self.generators:
+            clock = Clock(self, cashflow_generator_fn)
+            simctx = SimContext(self.accounts, clock, self.id_fountain)
+            iter_cashflows = cashflow_generator_fn(simctx)
+            logger = self._logger(cashflow_generator_fn, 'Cashflows')
+            yield GeneratorState(cashflow_generator_fn, iter_cashflows, clock, logger)
 
     def _logger(self, generator, label):
         logger = logging.getLogger(f'{generator.__name__}:{label}')
@@ -55,7 +56,7 @@ class Simulation(object):
         for g in self.generators[:]:
             if g.clock.ready:
                 try:
-                    cf = _next(g.iter_cashflows)
+                    cf = _next(g)
                 except GeneratorExhausted:
                     g.logger.info("Exhausted.. removing.")
                     self.generators = tuple(x for x in self.generators if g != x)
@@ -65,12 +66,10 @@ class Simulation(object):
                     if cf == WAITING:
                         g.clock._wait_was_awaited()
                         g.logger.trace('will wait until %s', g.clock.waiting_for)
-                    elif isinstance(cf, (list, tuple)) and len(cf) == 4:
+                    elif isinstance(cf, CashFlow):
                         g.clock._cf_was_yielded()
-                        amount, from_acct, to_acct, description = cf
-                        g.logger.info('Transfer %s from %s to %s: "%s"', cf[0], cf[1], cf[2], cf[3])
-                        txn_id = next(self.id_fountain)
-                        yield txn_id, self.current_period, from_acct, to_acct, amount, description
+                        g.logger.info('Transfer %s from %s to %s: "%s"', cf.amount, cf.from_acct, cf.to_acct, cf.description)
+                        yield cf
                     else:
                         msg = f'Expected a cashflow (amount, from, to, description) but got "{cf}"'
                         g.logger.error(msg)
@@ -152,15 +151,31 @@ class Simulation(object):
         writer.save()
 
 
-def _next(iter_cashflows):
+class SimContext:
+    
+    def __init__(self, accounts, clock, id_fountain):
+        self.accts = accounts
+        self.clock = clock
+        self.id_fountain = id_fountain
+
+    def cf(self, amount, src, dst, desc=None):
+        """Create a cashflow"""
+        txn_id = next(self.id_fountain)
+        current_period = self.clock.current_period
+        return CashFlow(txn_id, current_period, amount, src, dst, desc)
+
+
+def _next(state):
     # grab the next cash flow from the async generator or else a clock waiting event
     try:
-        generator = iter_cashflows.__anext__()
+        if state.async_gen is None:
+            state.async_gen = state.iter_cashflows.__anext__()
     except AttributeError as e:
         raise NotReadyAfterAll()
     try:
-        waiting = generator.send(None)
+        waiting = state.async_gen.send(None)
     except StopIteration as si:
+        state.async_gen = None
         return si.value
     except StopAsyncIteration as sai:
         raise GeneratorExhausted()
@@ -296,11 +311,10 @@ class StrictBalances(object):
         return self.balances.accounts
 
 
-class Balances(object):
+class Accounts(object):
 
-    def __init__(self, simulation, generator_name='unnamed'):
-        self.simulation = simulation
-        self.generator_name = generator_name
+    def __init__(self):
+        pass
 
     def __getitem__(self, acct):
         try:
@@ -308,19 +322,23 @@ class Balances(object):
         except KeyError:
             return 0
 
+    #kp: todo: how to link account names between generators?
+    def __getattr__(self, acct_name):
+        return acct_name
+
     def sum(self, accts):
         try:
-            return self.simulation.current_balances.loc[list(accts)].sum()
+            return self.current_balances.loc[list(accts)].sum()
         except KeyError:
             return 0
 
     @property
     def accounts(self):
-        return self.simulation.current_balances.index.tolist()
+        return self.current_balances.index.tolist()
 
 
 def cashflows_df(cfs):
-    return pd.DataFrame(cfs, columns=('txn_id', 'date', 'from_acct', 'to_acct', 'amount', 'description'))
+    return pd.DataFrame(cfs, columns=('txn_id', 'date', 'amount', 'from_acct', 'to_acct', 'description'))
 
 
 class SimulationLoggerAdapter(logging.LoggerAdapter):
@@ -364,7 +382,17 @@ class InvalidAccount(Exception):
     pass
 
 
-GeneratorAttributes = namedtuple('GeneratorAttributes', ('generator', 'iter_cashflows', 'clock', 'balances', 'logger'))
+@dataclass
+class GeneratorState:
+    generator: any
+    iter_cashflows: any
+    clock: Clock
+    logger: SimulationLoggerAdapter
+    async_gen: any = None
+
+
+GeneratorAttributes = namedtuple('GeneratorAttributes', ('generator', 'iter_cashflows', 'clock', 'logger'))
+CashFlow = namedtuple('CashFlow', ('txn_id', 'current_period', 'amount', 'from_acct', 'to_acct', 'description'))
 
 
 WAITING = object()
