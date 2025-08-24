@@ -5,7 +5,7 @@ from cfs.simulation import Simulation
 from cfs.cashflows import box_3_tax, initial, INITIAL_BALANCE_DESCRIPTION
 
 
-class WhenGeneratingCashflows(unittest.TestCase):
+class WhenGeneratingCashflows():
 
     def first_non_initial_cf(self, test_generator,
                              initial_cfs=((100000, 'starting', 'cash'), (50000, 'starting', 'investments'))):

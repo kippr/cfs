@@ -1,0 +1,3 @@
+expecter==0.3.0
+pandas==2.3.2
+pytest==8.4.1

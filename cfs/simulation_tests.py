@@ -16,7 +16,7 @@ import logging
 logging.basicConfig(level=logging.TRACE)
 
 
-class WhenSimulatingCashFlows(unittest.TestCase):
+class WhenSimulatingCashFlows():
 
     def should_generate_cashflows_in_simplest_case(self):
         async def cfs(clock, balances):
@@ -99,7 +99,7 @@ class WhenSimulatingCashFlows(unittest.TestCase):
             sim.run()
 
 
-class WhenAssertingWhichAccountsAreBeingUsed(unittest.TestCase):
+class WhenAssertingWhichAccountsAreBeingUsed():
 
     def should_enforce_only_registered_accounts_are_accessed(self):
         @assert_accounts('registered_acct1', 'registered_acct2')
@@ -134,7 +134,7 @@ def create_clock(start_date=date(2010, 1, 1)):
     return Clock(sim, None)
 
 
-class WhenWorkingWithClocks(unittest.TestCase):
+class WhenWorkingWithClocks():
 
     def should_be_able_to_hop_to_year_end(self):
         clock = create_clock()
@@ -149,7 +149,7 @@ class WhenWorkingWithClocks(unittest.TestCase):
         expect(clock.waiting_for) == date(2011, 12, 31)
 
 
-class WhenAccessingBalances(unittest.TestCase):
+class WhenAccessingBalances():
 
     def should_be_able_to_get_net_balance_across_multiple_accts(self):
         bals = pd.DataFrame([dict(cash=30, investments=70, other=200)]).loc[0]
