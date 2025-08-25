@@ -59,6 +59,10 @@ class Simulation(object):
             accts = []
         elif isinstance(accts, dict):
             accts = [Account(name=k, initial=v) for k, v in accts.items()]
+        else:
+            acct_names = [a.name for a in accts]
+            if len(acct_names) != len(set(acct_names)):
+                raise ValueError(f'Each account must be registered only once: {acct_names}')
         self.accts = Accounts(start_date, accts)
         self.generators = tuple(cashflow_generators)
 
@@ -104,6 +108,7 @@ class Simulation(object):
                     elif isinstance(cf, CashFlow):
                         g.clock._cf_was_yielded()
                         g.logger.info('Transfer %s from %s to %s: "%s"', cf.amount, cf.from_acct, cf.to_acct, cf.description)
+                        cf = self.accts._assert_accounts_are_valid(cf)
                         yield cf
                     else:
                         msg = f'Expected a cashflow (amount, from, to, description) but got "{cf}"'
@@ -283,53 +288,6 @@ class Clock(object):
 
 
 
-def assert_accounts(*registered_accounts):
-    """ This decorator can be added to your cash flow generators to assert they only access accounts specifically
-    registered. This can help prevent bugs.
-    """
-    def decorator(func):
-        @functools.wraps(func)
-        async def assert_account_access(clock, balances, **kargs):
-            strict_balances = StrictBalances(registered_accounts, balances)
-            async for cf in func(clock, strict_balances):
-                # kp: todo: don't like this here and in main loop.. better way? yield something meaningful?
-                if isinstance(cf, (list, tuple)) and len(cf) == 4:
-                    amount, from_acct, to_acct, description = cf
-                    strict_balances._assert_accts_known(from_acct, to_acct)
-                yield cf
-        return assert_account_access
-    return decorator
-
-
-class StrictBalances(object):
-    # kp: todo: review this.. kill it?
-
-    def __init__(self, registered_accounts, balances):
-        self.registered_accounts = registered_accounts
-        self.balances = balances
-
-    def __getitem__(self, acct):
-        self._assert_accts_known(acct)
-        return self.balances[acct]
-
-    def sum(self, accts):
-        self._assert_accts_known(*accts)
-        return self.balances.sum(accts)
-
-    def _assert_accts_known(self, *accounts_to_check):
-        for acct in accounts_to_check:
-            if acct not in self.registered_accounts:
-                raise InvalidAccount(f"'{acct}' not pre-registered with generator '{self.generator_name}'. Registered: '{self.registered_accounts}'")
-
-    @property
-    def generator_name(self):
-        return self.balances.generator_name
-
-    @property
-    def accounts(self):
-        return self.balances.accounts
-
-
 class Accounts():
 
     def __init__(self, start_date, accounts):
@@ -363,21 +321,10 @@ class Accounts():
     def postings(self):
         return self._journals.postings.sort_values('txn_id').set_index('txn_id')
 
-
-    #kp: todo: asking for trouble?
-    def __getitem__(self, acct):
-        try:
-            return self.current_balances[acct]
-        except KeyError:
-            return 0
-
-    #kp: todo: asking for trouble?
-    def ___getattr__(self, acct_name):
-        return acct_name
-
     def sum(self, accts):
+        accts = [a.name if isinstance(a, Account) else a for a in accts]
         try:
-            return self.current_balances.loc[list(accts)].sum()
+            return self.current_balances.loc[accts].sum()
         except KeyError:
             return 0
 
@@ -385,6 +332,20 @@ class Accounts():
     def accounts(self):
         # kp: todo: change this to return account objects?
         return self.current_balances.index.tolist()
+
+
+    def _assert_accounts_are_valid(self, cf):
+        if isinstance(cf.from_acct, Account):
+            cf = cf._replace(from_acct=cf.from_acct.name)
+        if isinstance(cf.to_acct, Account):
+            cf = cf._replace(to_acct=cf.to_acct.name)
+        if cf.from_acct not in self._accounts:
+            msg = f'Cashflow from account "{cf.from_acct}" is not a registered account: {self._accounts}'
+            raise InvalidAccount(msg)
+        if cf.to_acct not in self._accounts:
+            msg = f'Cashflow to account "{cf.to_acct}" is not a registered account: {self._accounts}'
+            raise InvalidAccount(msg)
+        return cf
 
 
 class JournalEntries():

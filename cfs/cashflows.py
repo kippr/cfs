@@ -1,20 +1,7 @@
 import numpy as np
 
-from cfs.simulation import assert_accounts
-
 import logging
 logger = logging.getLogger('cashflows')
-
-
-INITIAL_BALANCE_DESCRIPTION = 'Initial balance'
-def initial(initial_cfs):
-    #kp: to: better way to do this?
-    """ Yield 'starting balances' from passed initial_cfs, which should take form of:
-        ((amount, from_acct, to_acct), ..)"""
-    async def initial_cashflows(sim):
-        for amount, from_acct, to_acct in initial_cfs:
-            yield sim.cf(amount, from_acct, to_acct, INITIAL_BALANCE_DESCRIPTION)
-    yield initial_cashflows
 
 
 def amortizing_loan(principal=None, rate=None, years=None, amort_years=None,
@@ -23,7 +10,6 @@ def amortizing_loan(principal=None, rate=None, years=None, amort_years=None,
     amort_schedule = np.ppmt(rate, periods, amort_years, principal) * -1
     int_schedule = np.ipmt(rate, periods, amort_years, principal) * -1
 
-    @assert_accounts(payment_acct, principal_acct)
     async def amortizing_loan_principal_cfs(clock, balances):
         yield sim.cf(principal, principal_acct, payment_acct, 'Initial loan draw')
         await clock.tick(years=1, days=-1)
@@ -36,7 +22,6 @@ def amortizing_loan(principal=None, rate=None, years=None, amort_years=None,
         await clock.tick(days=1)
         yield sim.cf(balances[principal_acct] * -1, payment_acct, principal_acct, 'Paydown')
 
-    @assert_accounts(payment_acct, interest_acct)
     async def amortizing_loan_interest_cfs(clock, balances):
         await clock.tick(years=1, days=-1)
         for period in range(years):

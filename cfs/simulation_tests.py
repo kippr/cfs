@@ -7,7 +7,6 @@ from cfs.simulation import Simulation
 from cfs.simulation import Clock
 from cfs.simulation import Accounts
 from cfs.simulation import Account
-from cfs.simulation import assert_accounts
 from cfs.simulation import InvalidWaitTime
 from cfs.simulation import InvalidCashFlowYielded
 from cfs.simulation import InvalidAccount
@@ -21,11 +20,10 @@ class WhenSimulatingCashFlows():
 
     def should_generate_cashflows_in_simplest_case(self):
         async def cfs(sim):
-            accts = sim.accts
             yield sim.cf(amount=100, src='debit', dst='credit', desc='1st')
             yield sim.cf(200, 'debit', 'credit', '2nd')
             yield sim.cf(300, 'debit', 'credit', '3rd')
-        sim = Simulation(start_date=date(2019, 6, 1)).add(cfs).run()
+        sim = Simulation(start_date=date(2019, 6, 1), accts=dict(debit=0, credit=0)).add(cfs).run()
         #kp: todo: how to deal with accts?
         expect(sim.accts.current_balances['debit']) == -600
 
@@ -36,8 +34,12 @@ class WhenSimulatingCashFlows():
         async def second(sim):
             yield sim.cf(200, 'A', 'C', 'second')
             yield sim.cf(400, 'A', 'C', 'last')
-        sim = Simulation(first, second, start_date=date(2019, 6, 1), end_date=date(2030, 6, 1)).run()
-        expect(sim.accts.journals['amount'].tolist()) == [100, 200, 300, 400]
+        sim = Simulation(first, second, 
+                         start_date=date(2019, 6, 1), 
+                         end_date=date(2030, 6, 1),
+                         accts=dict(A=0, B=0, C=0),
+                         ).run()
+        expect(sim.accts.journals['amount'].tolist()) == [0, 0, 0, 100, 200, 300, 400]
 
     def should_respect_clock(self):
         async def first(sim):
@@ -48,7 +50,11 @@ class WhenSimulatingCashFlows():
         async def second(sim):
             await sim.clock.until(date(2020, 1, 1))
             yield sim.cf(100, 'A', 'B')
-        sim = Simulation(first, second, start_date=date(2019, 6, 1), end_date=date(2030, 6, 1)).run()
+        sim = Simulation(first, second, 
+                         start_date=date(2019, 6, 1), 
+                         end_date=date(2030, 6, 1),
+                         accts=dict(A=0, B=0),
+                         ).run()
         bals = sim.accts.balances_by_date
         expect(bals.loc[date(2019, 6, 1), 'B']) == 100
         expect(bals.loc[date(2020, 1, 1), 'B']) == 200
@@ -58,7 +64,7 @@ class WhenSimulatingCashFlows():
         async def first(sim):
             yield sim.cf(100, 'A', 'B', 'Meh')
             await sim.clock.until(date(2010, 1,1))
-        sim = Simulation(first, start_date=date(2019, 6, 1), end_date=date(2030, 6, 1))
+        sim = Simulation(first, start_date=date(2019, 6, 1), end_date=date(2030, 6, 1), accts=dict(A=0, B=0))
         with expect.raises(InvalidWaitTime):
             sim.run()
 
@@ -67,9 +73,9 @@ class WhenSimulatingCashFlows():
             while True:
                 await sim.clock.next_calendar_year_end()
                 yield sim.cf(100, 'A', 'B', 'Meh')
-        sim = Simulation(test, start_date=date(2019, 1, 1), end_date=date(2019, 6, 30))
+        sim = Simulation(test, start_date=date(2019, 1, 1), end_date=date(2019, 6, 30), accts=dict(A=0, B=0))
         sim.run()
-        expect(sim.accts.journals['amount'].tolist()) == []
+        expect(sim.accts.journals['amount'].tolist()) == [0, 0]
 
     def should_be_able_to_handle_multiple_waits_in_a_row(self):
         async def test(sim):
@@ -78,7 +84,7 @@ class WhenSimulatingCashFlows():
             await sim.clock.next_calendar_year_end()
             await sim.clock.next_calendar_year_end()
             yield sim.cf(100, 'A', 'B', 'Finally ready')
-        sim = Simulation(test, start_date=date(2019, 1, 1)).run()
+        sim = Simulation(test, start_date=date(2019, 1, 1), accts=dict(A=0, B=0)).run()
         cf = sim.accts.journals
         result = cf.loc[cf['date'] == date(2021, 12, 31), 'amount'].tolist()
         expect(result) == [100]
@@ -90,7 +96,10 @@ class WhenSimulatingCashFlows():
             yield sim.cf(100, 'A', 'B', 'ok')
             sim.clock.tick(years=1)
             yield sim.cf(100, 'A', 'B', 'ok')
-        sim = Simulation(badly_written_generator, start_date=date(2019, 6, 1), end_date=date(2030, 6, 1))
+        sim = Simulation(badly_written_generator, 
+                         start_date=date(2019, 6, 1), 
+                         end_date=date(2030, 6, 1), 
+                         accts=dict(A=0, B=0))
         with expect.raises(FailedToAwaitClock):
             sim.run()
 
@@ -104,36 +113,42 @@ class WhenSimulatingCashFlows():
 
 class WhenAssertingWhichAccountsAreBeingUsed():
 
-    # kp: todo: should revisit this
-    def xshould_enforce_only_registered_accounts_are_accessed(self):
-        @assert_accounts('registered_acct1', 'registered_acct2')
-        async def badly_written_generator(clock, balances):
-            balances['registered_acct1']
-            balances['forgotten_acct']
-            yield 100, 'registered_acct1', 'registered_acct2', 'Should not get this far'
-        sim = Simulation(badly_written_generator, start_date=date(2019, 6, 1), end_date=date(2030, 6, 1))
+    def should_enforce_only_registered_accounts_are_accessed(self):
+        async def badly_written_generator(sim):
+            should_fail = sim.accts.current_balances['forgotten_acct']
+            yield 'meh ' # without a yield in body you get GeneratorExhaustedError without anything running
+        sim = Simulation(badly_written_generator, start_date=date(2019, 6, 1))
+        with expect.raises(KeyError):
+            sim.run()
+
+    def should_enforce_cash_only_flows_between_registered_accounts(self):
+        async def badly_written_generator(sim):
+            yield sim.cf(100, 'registered_acct', 'forgotten_acct', 'should die because forgotten not registered')
+        sim = Simulation(badly_written_generator, start_date=date(2019, 6, 1), accts=[
+            Account(name='registered_acct', initial=1000),
+        ])
         with expect.raises(InvalidAccount):
             sim.run()
 
-    def xshould_enforce_cash_only_flows_between_with_registered_accounts(self):
-        @assert_accounts('registered_acct')
-        async def badly_written_generator(clock, balances):
-            yield 100, 'registered_acct', 'forgotten_acct', 'should die because forgotten not registered'
-        sim = Simulation(badly_written_generator, start_date=date(2019, 6, 1), end_date=date(2030, 6, 1))
-        with expect.raises(InvalidAccount):
+    def should_enforce_each_account_is_registered_only_once(self):
+        def badly_configured_simulation():
+            sim = Simulation(start_date=date(2019, 6, 1), accts=[
+                Account(name='registered_acct', initial=1000),
+                Account(name='registered_acct', initial=500),
+            ])
             sim.run()
-
-
-class FakeSimulation(object):
-    def __init__(self, start_date=None, current_balances=None, **kwargs):
-        self.start_date = start_date
-        self.current_balances = current_balances
-
-    def _logger(self, *args):
-        return None
+        with expect.raises(ValueError):
+            badly_configured_simulation()
 
 
 def create_clock(start_date=date(2010, 1, 1)):
+    class FakeSimulation(object):
+        def __init__(self, start_date=None):
+            self.start_date = start_date
+
+        def _logger(self, *args):
+            return None
+
     sim = FakeSimulation(start_date=start_date)
     return Clock(sim, None)
 
