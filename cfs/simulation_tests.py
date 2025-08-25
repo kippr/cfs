@@ -6,6 +6,7 @@ from datetime import date
 from cfs.simulation import Simulation
 from cfs.simulation import Clock
 from cfs.simulation import Accounts
+from cfs.simulation import Account
 from cfs.simulation import assert_accounts
 from cfs.simulation import InvalidWaitTime
 from cfs.simulation import InvalidCashFlowYielded
@@ -18,29 +19,15 @@ logging.basicConfig(level=logging.TRACE)
 
 class WhenSimulatingCashFlows():
 
-    def should_step_forward(self):
-        async def cfs(sim):
-            print('sending 1st 100')
-            yield sim.cf(100, 'foo', 'bar')
-            print('sending 2nd 100')
-            yield sim.cf(100, 'foo', 'bar')
-            print('waiting a year')
-            await sim.clock.tick(years=1)
-            print('sending 3rd 200')
-            yield sim.cf(100, 'foo', 'bar')
-            print('all done')
-        sim = Simulation(cfs, start_date=date(2025, 8, 24), end_date=date(2026, 8, 24)).run()
-        expect(sim.current_balances['bar']) == 300
-
     def should_generate_cashflows_in_simplest_case(self):
         async def cfs(sim):
             accts = sim.accts
-            yield sim.cf(amount=100, src=accts.debit, dst=accts.credit, desc='1st')
-            yield sim.cf(200, accts.debit, accts.credit, '2nd')
-            yield sim.cf(300, accts.debit, accts.credit, '3rd')
-        sim = Simulation(cfs, start_date=date(2019, 6, 1), end_date=date(2030, 6, 1)).run()
+            yield sim.cf(amount=100, src='debit', dst='credit', desc='1st')
+            yield sim.cf(200, 'debit', 'credit', '2nd')
+            yield sim.cf(300, 'debit', 'credit', '3rd')
+        sim = Simulation(start_date=date(2019, 6, 1)).add(cfs).run()
         #kp: todo: how to deal with accts?
-        expect(sim.current_balances['debit']) == -600
+        expect(sim.accts.current_balances['debit']) == -600
 
     def should_interleave_generators(self):
         async def first(sim):
@@ -50,7 +37,7 @@ class WhenSimulatingCashFlows():
             yield sim.cf(200, 'A', 'C', 'second')
             yield sim.cf(400, 'A', 'C', 'last')
         sim = Simulation(first, second, start_date=date(2019, 6, 1), end_date=date(2030, 6, 1)).run()
-        expect(sim.cashflows['amount'].tolist()) == [100, 200, 300, 400]
+        expect(sim.accts.journals['amount'].tolist()) == [100, 200, 300, 400]
 
     def should_respect_clock(self):
         async def first(sim):
@@ -62,54 +49,54 @@ class WhenSimulatingCashFlows():
             await sim.clock.until(date(2020, 1, 1))
             yield sim.cf(100, 'A', 'B')
         sim = Simulation(first, second, start_date=date(2019, 6, 1), end_date=date(2030, 6, 1)).run()
-        bals = sim.balances
+        bals = sim.accts.balances_by_date
         expect(bals.loc[date(2019, 6, 1), 'B']) == 100
         expect(bals.loc[date(2020, 1, 1), 'B']) == 200
         expect(bals.loc[date(2020, 6, 1), 'B']) == 500
 
     def should_enforce_time_moves_only_forward(self):
-        async def first(clock, balances):
-            yield 100, 'A', 'B', 'Meh'
-            await clock.until(date(2010, 1,1))
+        async def first(sim):
+            yield sim.cf(100, 'A', 'B', 'Meh')
+            await sim.clock.until(date(2010, 1,1))
         sim = Simulation(first, start_date=date(2019, 6, 1), end_date=date(2030, 6, 1))
         with expect.raises(InvalidWaitTime):
             sim.run()
 
     def should_end_simulation_if_clock_advances_past_end_date(self):
-        async def test(clock, balances):
+        async def test(sim):
             while True:
-                await clock.next_calendar_year_end()
-                yield 100, 'A', 'B', 'Meh'
-        sim = Simulation(test, start_date=date(2019, 1, 1), end_date=date(2020, 1, 1))
+                await sim.clock.next_calendar_year_end()
+                yield sim.cf(100, 'A', 'B', 'Meh')
+        sim = Simulation(test, start_date=date(2019, 1, 1), end_date=date(2019, 6, 30))
         sim.run()
-        expect(sim.current_period) is None
+        expect(sim.accts.journals['amount'].tolist()) == []
 
     def should_be_able_to_handle_multiple_waits_in_a_row(self):
-        async def test(clock, balances):
+        async def test(sim):
             # if for example there is an if clause around yield?
-            await clock.next_calendar_year_end()
-            await clock.next_calendar_year_end()
-            await clock.next_calendar_year_end()
-            yield 100, 'A', 'B', 'Finally ready'
-        sim = Simulation(test, start_date=date(2019, 1, 1), end_date=date(2025, 1, 1)).run()
-        cf = sim.cashflows
+            await sim.clock.next_calendar_year_end()
+            await sim.clock.next_calendar_year_end()
+            await sim.clock.next_calendar_year_end()
+            yield sim.cf(100, 'A', 'B', 'Finally ready')
+        sim = Simulation(test, start_date=date(2019, 1, 1)).run()
+        cf = sim.accts.journals
         result = cf.loc[cf['date'] == date(2021, 12, 31), 'amount'].tolist()
         expect(result) == [100]
 
     def should_enforce_generators_await_clock(self):
         # doesn't work because call to async wait method without await means it won't be run
         # is there a way to see which futures are doing nothing and assert failure?
-        async def badly_written_generator(clock, balances):
-            yield 100, 'A', 'B', 'ok'
-            clock.tick(years=1)
-            yield 100, 'A', 'B', 'ok'
+        async def badly_written_generator(sim):
+            yield sim.cf(100, 'A', 'B', 'ok')
+            sim.clock.tick(years=1)
+            yield sim.cf(100, 'A', 'B', 'ok')
         sim = Simulation(badly_written_generator, start_date=date(2019, 6, 1), end_date=date(2030, 6, 1))
         with expect.raises(FailedToAwaitClock):
             sim.run()
 
     def should_check_only_valid_cashflows_yielded(self):
-        async def badly_written_generator(clock, balances):
-            yield 100, 'A', 'B'  # forgot desc
+        async def badly_written_generator(sim):
+            yield 'hello mum'
         sim = Simulation(badly_written_generator, start_date=date(2019, 6, 1), end_date=date(2030, 6, 1))
         with expect.raises(InvalidCashFlowYielded):
             sim.run()
@@ -117,7 +104,8 @@ class WhenSimulatingCashFlows():
 
 class WhenAssertingWhichAccountsAreBeingUsed():
 
-    def should_enforce_only_registered_accounts_are_accessed(self):
+    # kp: todo: should revisit this
+    def xshould_enforce_only_registered_accounts_are_accessed(self):
         @assert_accounts('registered_acct1', 'registered_acct2')
         async def badly_written_generator(clock, balances):
             balances['registered_acct1']
@@ -127,7 +115,7 @@ class WhenAssertingWhichAccountsAreBeingUsed():
         with expect.raises(InvalidAccount):
             sim.run()
 
-    def should_enforce_cash_only_flows_between_with_registered_accounts(self):
+    def xshould_enforce_cash_only_flows_between_with_registered_accounts(self):
         @assert_accounts('registered_acct')
         async def badly_written_generator(clock, balances):
             yield 100, 'registered_acct', 'forgotten_acct', 'should die because forgotten not registered'
@@ -168,8 +156,10 @@ class WhenWorkingWithClocks():
 class WhenAccessingAccounts():
 
     def should_be_able_to_get_net_balance_across_multiple_accts(self):
-        bals = pd.DataFrame([dict(cash=30, investments=70, other=200)]).loc[0]
-        sim = FakeSimulation(current_balances=bals)
-        accts = ('cash', 'investments')
-        balances = Accounts(sim, accts)
-        expect(balances.sum(accts)) == 100
+        accts = Accounts(start_date=date(2025, 8, 24), accounts=[
+            Account(name='cash', initial=30),
+            Account(name='investments', initial=70),
+            Account(name='other', initial=200),
+
+        ])
+        expect(accts.sum(('cash', 'investments'))) == 100

@@ -1,5 +1,6 @@
 from collections import namedtuple
 from dataclasses import dataclass
+from enum import Enum
 import pandas as pd
 import datetime
 from dateutil.relativedelta import relativedelta
@@ -9,6 +10,28 @@ import functools
 import logging
 logging.addLevelName(5, 'TRACE')
 logging.TRACE = 5
+WAITING = type("Waiting", (), dict(__repr__=lambda self: "WAITING"))()
+INITIAL = 'initial'
+INITIAL_BALANCE_DESCRIPTION = 'Initial balance'
+
+
+CashFlow = namedtuple('CashFlow', ('txn_id', 'date', 'amount', 'from_acct', 'to_acct', 'description'))
+
+
+class AcctType(Enum):
+    ASSET = 'asset'
+    LIABILITY = 'liability'
+    INCOME = 'income'
+    EXPENSE = 'expense'
+    EQUITY = 'equity'
+
+
+@dataclass
+class Account:
+    name: str
+    initial: float = 0.0
+    description: str = None
+    type: AcctType = AcctType.ASSET
 
 
 class Simulation(object):
@@ -18,22 +41,35 @@ class Simulation(object):
     """
     id_fountain = None
     last_period = None
+    @dataclass
+    class GeneratorState:
+        generator: any
+        iter_cashflows: any
+        clock: 'Clock'
+        logger: 'SimulationLoggerAdapter'
+        async_gen: any = None
 
-    def __init__(self, *cashflow_generators, start_date=None, end_date=None):
+    def __init__(self, *cashflow_generators, start_date=None, end_date=None, accts=None):
+        if not end_date:
+            end_date = start_date + relativedelta(years=5)
         assert start_date < end_date, 'Start date must be < end_date'
         self.logger = self._logger(self.__class__, 'Main')
         self.start_date, self.current_period, self.end_date = start_date, start_date, end_date
-        # kp: todo: kill cashflow_generators from param list?
-        self.generators = tuple(g for cfg in cashflow_generators for g in cfg)
+        if not accts:
+            accts = []
+        elif isinstance(accts, dict):
+            accts = [Account(name=k, initial=v) for k, v in accts.items()]
+        self.accts = Accounts(start_date, accts)
+        self.generators = tuple(cashflow_generators)
 
     def add(self, *cashflow_generators):
         self.generators = self.generators + tuple(cashflow_generators)
+        return self
 
     def _prepare_run(self):
         if self.id_fountain is not None:
             raise GeneratorExhausted("Simulation already run?")
         self.id_fountain = iter(range(1, 10000000000))
-        self.accounts = Accounts()
         self.last_period = False
         self.generators = tuple(self._setup_generators())
         self.logger.info("Initialized cashflow generators: %s",
@@ -42,10 +78,10 @@ class Simulation(object):
     def _setup_generators(self):
         for cashflow_generator_fn in self.generators:
             clock = Clock(self, cashflow_generator_fn)
-            simctx = SimContext(self.accounts, clock, self.id_fountain)
+            simctx = SimContext(self.accts, clock, self.id_fountain)
             iter_cashflows = cashflow_generator_fn(simctx)
             logger = self._logger(cashflow_generator_fn, 'Cashflows')
-            yield GeneratorState(cashflow_generator_fn, iter_cashflows, clock, logger)
+            yield self.GeneratorState(cashflow_generator_fn, iter_cashflows, clock, logger)
 
     def _logger(self, generator, label):
         logger = logging.getLogger(f'{generator.__name__}:{label}')
@@ -105,13 +141,13 @@ class Simulation(object):
             try:
                 period_advanced = self._maybe_advance_period(must_advance=not cfs_for_period)
             except StopSimulation as e:
-                self.accounts.append(cfs_for_period)
+                self.accts.append(cfs_for_period)
                 self.logger.info(str(e))
                 self.current_period = None
                 break
             else:
                 if period_advanced:
-                    self.accounts.append(cfs_for_period)
+                    self.accts.append(cfs_for_period)
                     cfs_for_period = []
         return self
 
@@ -217,7 +253,6 @@ class Clock(object):
     @enforce_awaited
     @types.coroutine
     def tick(self, **kwargs):
-        print("Watiging")
         date = self.current_period + relativedelta(**kwargs)
         yield from self.until(date)
 
@@ -297,8 +332,11 @@ class StrictBalances(object):
 
 class Accounts():
 
-    def __init__(self):
-        self._journals = JournalEntries()
+    def __init__(self, start_date, accounts):
+        self._accounts = {acct.name for acct in accounts}
+        initial_cfs = [CashFlow(0, start_date, acct.initial, INITIAL, acct.name, INITIAL_BALANCE_DESCRIPTION) 
+            for acct in accounts]
+        self._journals = JournalEntries(initial_cfs)
 
     def append(self, period_cashflows):
         cfs = list(period_cashflows)
@@ -345,13 +383,14 @@ class Accounts():
 
     @property
     def accounts(self):
+        # kp: todo: change this to return account objects?
         return self.current_balances.index.tolist()
 
 
 class JournalEntries():
 
-    def __init__(self):
-        self.journals = _journals([])
+    def __init__(self, initial_cfs):
+        self.journals = _journals(initial_cfs or [])
 
     def _append_cashflows(self, period_cashflows):
         period_journals = _journals(period_cashflows)
@@ -410,18 +449,3 @@ class InvalidCashFlowYielded(Exception):
 
 class InvalidAccount(Exception):
     pass
-
-
-@dataclass
-class GeneratorState:
-    generator: any
-    iter_cashflows: any
-    clock: Clock
-    logger: SimulationLoggerAdapter
-    async_gen: any = None
-
-
-CashFlow = namedtuple('CashFlow', ('txn_id', 'current_period', 'amount', 'from_acct', 'to_acct', 'description'))
-
-
-WAITING = object()
