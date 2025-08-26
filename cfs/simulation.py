@@ -49,21 +49,15 @@ class Simulation(object):
         logger: 'SimulationLoggerAdapter'
         async_gen: any = None
 
-    def __init__(self, *cashflow_generators, start_date=None, end_date=None, accts=None):
+    def __init__(self, *cashflow_generators, accts=None, start_date=None, end_date=None):
         if not end_date:
             end_date = start_date + relativedelta(years=5)
         assert start_date < end_date, 'Start date must be < end_date'
         self.logger = self._logger(self.__class__, 'Main')
         self.start_date, self.current_period, self.end_date = start_date, start_date, end_date
-        if not accts:
-            accts = []
-        elif isinstance(accts, dict):
-            accts = [Account(name=k, initial=v) for k, v in accts.items()]
-        else:
-            acct_names = [a.name for a in accts]
-            if len(acct_names) != len(set(acct_names)):
-                raise ValueError(f'Each account must be registered only once: {acct_names}')
-        self.accts = Accounts(start_date, accts)
+        if not accts or isinstance(accts, dict):
+            accts = Accounts(accts)
+        self.accts = accts
         self.generators = tuple(cashflow_generators)
 
     def add(self, *cashflow_generators):
@@ -74,6 +68,7 @@ class Simulation(object):
         if self.id_fountain is not None:
             raise GeneratorExhausted("Simulation already run?")
         self.id_fountain = iter(range(1, 10000000000))
+        self.accts._prepare(self.start_date)
         self.last_period = False
         self.generators = tuple(self._setup_generators())
         self.logger.info("Initialized cashflow generators: %s",
@@ -287,14 +282,29 @@ class Clock(object):
             raise FailedToAwaitClock(msg)
 
 
-
 class Accounts():
 
-    def __init__(self, start_date, accounts):
-        self._accounts = {acct.name for acct in accounts}
-        initial_cfs = [CashFlow(0, start_date, acct.initial, INITIAL, acct.name, INITIAL_BALANCE_DESCRIPTION) 
-            for acct in accounts]
+    def __init__(self, accts=None):
+        """Hold the accounts for a sim.. Accounts can be created as a dict of name:initial_balance,
+        or using the `add(<details>)` method"""
+        if accts:
+            self._accounts = {k: Account(name=k, initial=v) for k, v in accts.items()}
+        else:
+            self._accounts = {}
+
+    def _prepare(self, start_date):
+        initial_cfs = [CashFlow(0, start_date, acct.initial or 0, INITIAL, acct.name, INITIAL_BALANCE_DESCRIPTION) 
+            for acct in self._accounts.values()]
         self._journals = JournalEntries(initial_cfs)
+
+    def add(self, name=None, initial=0.0, description=None, type=AcctType.ASSET):
+        if not name:
+            raise ValueError("Account name is required")
+        if name in self._accounts:
+            raise ValueError(f"Account '{name}' already exists")
+        acct = Account(name=name, initial=initial, description=description, type=type)
+        self._accounts[name] = acct
+        return acct
 
     def append(self, period_cashflows):
         cfs = list(period_cashflows)
@@ -323,15 +333,12 @@ class Accounts():
 
     def sum(self, accts):
         accts = [a.name if isinstance(a, Account) else a for a in accts]
-        try:
-            return self.current_balances.loc[accts].sum()
-        except KeyError:
-            return 0
+        bals = self.current_balances
+        return self.current_balances.loc[accts].sum()
 
     @property
     def accounts(self):
-        # kp: todo: change this to return account objects?
-        return self.current_balances.index.tolist()
+        return self._accounts.values()
 
 
     def _assert_accounts_are_valid(self, cf):

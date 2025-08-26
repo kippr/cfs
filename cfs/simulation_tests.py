@@ -23,7 +23,7 @@ class WhenSimulatingCashFlows():
             yield sim.cf(amount=100, src='debit', dst='credit', desc='1st')
             yield sim.cf(200, 'debit', 'credit', '2nd')
             yield sim.cf(300, 'debit', 'credit', '3rd')
-        sim = Simulation(start_date=date(2019, 6, 1), accts=dict(debit=0, credit=0)).add(cfs).run()
+        sim = Simulation(start_date=date(2019, 6, 1), accts=Accounts(dict(debit=0, credit=0))).add(cfs).run()
         #kp: todo: how to deal with accts?
         expect(sim.accts.current_balances['debit']) == -600
 
@@ -111,35 +111,42 @@ class WhenSimulatingCashFlows():
             sim.run()
 
 
-class WhenAssertingWhichAccountsAreBeingUsed():
+class WhenAccessingAccounts():
 
-    def should_enforce_only_registered_accounts_are_accessed(self):
+    def should_enforce_only_registered_accounts_are_available(self):
         async def badly_written_generator(sim):
             should_fail = sim.accts.current_balances['forgotten_acct']
             yield 'meh ' # without a yield in body you get GeneratorExhaustedError without anything running
-        sim = Simulation(badly_written_generator, start_date=date(2019, 6, 1))
+        sim = Simulation(badly_written_generator, start_date=date(2019, 6, 1), accts={})
         with expect.raises(KeyError):
             sim.run()
 
     def should_enforce_cash_only_flows_between_registered_accounts(self):
         async def badly_written_generator(sim):
             yield sim.cf(100, 'registered_acct', 'forgotten_acct', 'should die because forgotten not registered')
-        sim = Simulation(badly_written_generator, start_date=date(2019, 6, 1), accts=[
-            Account(name='registered_acct', initial=1000),
-        ])
+        sim = Simulation(badly_written_generator, start_date=date(2019, 6, 1), accts=dict(registered_acct=1000))
         with expect.raises(InvalidAccount):
             sim.run()
 
     def should_enforce_each_account_is_registered_only_once(self):
-        def badly_configured_simulation():
-            sim = Simulation(start_date=date(2019, 6, 1), accts=[
-                Account(name='registered_acct', initial=1000),
-                Account(name='registered_acct', initial=500),
-            ])
-            sim.run()
+        sim = Simulation(start_date=date(2019, 6, 1), accts=dict(registered_acct=500))
         with expect.raises(ValueError):
-            badly_configured_simulation()
+            sim.accts.add(name='registered_acct', initial=300)
 
+    def should_be_able_to_get_net_balance_across_multiple_accts(self):
+        accts = Accounts(accts=dict(
+            cash=30,
+            investments=70,
+            other=200,
+        ))
+        accts._prepare(start_date=date(2019, 1, 1))
+        expect(accts.sum(('cash', 'investments'))) == 100
+
+    def should_enforce_names_being_summed_exist(self):
+        accts = Accounts(accts=dict(cash=30))
+        accts._prepare(start_date=date(2019, 1, 1))
+        with expect.raises(KeyError):
+            accts.sum(('cash', 'nonexistent_acct'))
 
 def create_clock(start_date=date(2010, 1, 1)):
     class FakeSimulation(object):
@@ -166,15 +173,3 @@ class WhenWorkingWithClocks():
         clock.simulation.current_period = date(2010, 12, 31)
         next(clock.next_calendar_year_end())
         expect(clock.waiting_for) == date(2011, 12, 31)
-
-
-class WhenAccessingAccounts():
-
-    def should_be_able_to_get_net_balance_across_multiple_accts(self):
-        accts = Accounts(start_date=date(2025, 8, 24), accounts=[
-            Account(name='cash', initial=30),
-            Account(name='investments', initial=70),
-            Account(name='other', initial=200),
-
-        ])
-        expect(accts.sum(('cash', 'investments'))) == 100
