@@ -8,6 +8,7 @@ import time
 import types
 import functools
 import logging
+import inspect
 logging.addLevelName(5, 'TRACE')
 logging.TRACE = 5
 WAITING = type("Waiting", (), dict(__repr__=lambda self: "WAITING"))()
@@ -45,9 +46,13 @@ class Simulation(object):
     class GeneratorState:
         generator: any
         iter_cashflows: any
-        clock: 'Clock'
+        simctx: 'SimContext'
         logger: 'SimulationLoggerAdapter'
         async_gen: any = None
+
+        @property
+        def clock(self):
+            return self.simctx.clock
 
     def __init__(self, *cashflow_generators, accts=None, start_date=None, end_date=None):
         if not end_date:
@@ -76,11 +81,19 @@ class Simulation(object):
 
     def _setup_generators(self):
         for cashflow_generator_fn in self.generators:
-            clock = Clock(self, cashflow_generator_fn)
-            simctx = SimContext(self.accts, clock, self.id_fountain)
+            if not inspect.isasyncgenfunction(cashflow_generator_fn):
+                raise InvalidGenerator(f"Cashflow generator '{cashflow_generator_fn.__name__}' "
+                    "is not an async generator function")
+            clock = Clock(self, self._logger(cashflow_generator_fn, 'Clock'))
+            simctx = SimContext(self.accts, clock, self.id_fountain, self._logger(cashflow_generator_fn, 'SimContext'))
             iter_cashflows = cashflow_generator_fn(simctx)
             logger = self._logger(cashflow_generator_fn, 'Cashflows')
-            yield self.GeneratorState(cashflow_generator_fn, iter_cashflows, clock, logger)
+            yield self.GeneratorState(
+                generator=cashflow_generator_fn,
+                iter_cashflows=iter_cashflows,
+                logger=logger,
+                simctx=simctx,
+            )
 
     def _logger(self, generator, label):
         logger = logging.getLogger(f'{generator.__name__}:{label}')
@@ -94,6 +107,7 @@ class Simulation(object):
                 except GeneratorExhausted:
                     g.logger.info("Exhausted.. removing.")
                     self.generators = tuple(x for x in self.generators if g != x)
+                    g.simctx.close()
                 except NotReadyAfterAll:
                     g.logger.debug("No cfs yet after all.. Two awaits in a row.")
                 else:
@@ -101,9 +115,9 @@ class Simulation(object):
                         g.clock._wait_was_awaited()
                         g.logger.trace('will wait until %s', g.clock.waiting_for)
                     elif isinstance(cf, CashFlow):
-                        g.clock._cf_was_yielded()
-                        g.logger.info('Transfer %s from %s to %s: "%s"', cf.amount, cf.from_acct, cf.to_acct, cf.description)
+                        g.simctx._cf_was_yielded()
                         cf = self.accts._assert_accounts_are_valid(cf)
+                        g.logger.info('Transfer %s from %s to %s: "%s"', cf.amount, cf.from_acct, cf.to_acct, cf.description)
                         yield cf
                     else:
                         msg = f'Expected a cashflow (amount, from, to, description) but got "{cf}"'
@@ -144,6 +158,8 @@ class Simulation(object):
                 self.accts.append(cfs_for_period)
                 self.logger.info(str(e))
                 self.current_period = None
+                for g in self.generators[:]:
+                    g.simctx.close()
                 break
             else:
                 if period_advanced:
@@ -171,16 +187,35 @@ class Simulation(object):
 
 class SimContext:
     
-    def __init__(self, accounts, clock, id_fountain):
+    def __init__(self, accounts, clock, id_fountain, logger):
         self.accts = accounts
         self.clock = clock
         self.id_fountain = id_fountain
+        self._unyielded_cfs: int = 0
+        self.logger = logger
 
     def cf(self, amount, src, dst, desc=None):
         """Create a cashflow"""
         txn_id = next(self.id_fountain)
         current_period = self.clock.current_period
+        self._unyielded_cfs += 1
         return CashFlow(txn_id, current_period, amount, src, dst, desc)
+
+    def _cf_was_yielded(self):
+        self._unyielded_cfs -= 1
+        self.clock._cf_was_yielded()
+
+    def close(self):
+        self._assert_all_cfs_yielded()
+        self.id_fountain = None
+        self.clock = None
+        self.accts = None
+
+    def _assert_all_cfs_yielded(self):
+        if self._unyielded_cfs > 0:
+            msg = f"{self._unyielded_cfs} unyielded cashflow(s) remaining when generator ended"
+            self.logger.error(msg)
+            raise FailedToYieldCashFlow(msg)
 
 
 def _next(state):
@@ -211,11 +246,12 @@ def enforce_awaited(wrapped):
 
 class Clock(object):
 
-    def __init__(self, simulation, generator):
+    def __init__(self, simulation, clock_logger):
         self.simulation = simulation
         self._waiting_for = simulation.start_date
-        self.logger = simulation._logger(generator, 'Clock')
+        self.logger = clock_logger
         self._awaiting_clock_wait = False
+        self._unyielded_cfs = 0
 
     @property
     def current_period(self):
@@ -399,6 +435,10 @@ class FailedToAwaitClock(Exception):
     pass
 
 
+class FailedToYieldCashFlow(Exception):
+    pass
+
+
 class GeneratorExhausted(Exception):
     pass
 
@@ -416,4 +456,8 @@ class InvalidCashFlowYielded(Exception):
 
 
 class InvalidAccount(Exception):
+    pass
+
+
+class InvalidGenerator(Exception):
     pass

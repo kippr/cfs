@@ -11,6 +11,8 @@ from cfs.simulation import InvalidWaitTime
 from cfs.simulation import InvalidCashFlowYielded
 from cfs.simulation import InvalidAccount
 from cfs.simulation import FailedToAwaitClock
+from cfs.simulation import FailedToYieldCashFlow
+from cfs.simulation import InvalidGenerator
 
 import logging
 logging.basicConfig(level=logging.TRACE)
@@ -60,14 +62,6 @@ class WhenSimulatingCashFlows():
         expect(bals.loc[date(2020, 1, 1), 'B']) == 200
         expect(bals.loc[date(2020, 6, 1), 'B']) == 500
 
-    def should_enforce_time_moves_only_forward(self):
-        async def first(sim):
-            yield sim.cf(100, 'A', 'B', 'Meh')
-            await sim.clock.until(date(2010, 1,1))
-        sim = Simulation(first, start_date=date(2019, 6, 1), end_date=date(2030, 6, 1), accts=dict(A=0, B=0))
-        with expect.raises(InvalidWaitTime):
-            sim.run()
-
     def should_end_simulation_if_clock_advances_past_end_date(self):
         async def test(sim):
             while True:
@@ -89,6 +83,9 @@ class WhenSimulatingCashFlows():
         result = cf.loc[cf['date'] == date(2021, 12, 31), 'amount'].tolist()
         expect(result) == [100]
 
+
+class WhenGeneratorsAreMisbehaving():
+
     def should_enforce_generators_await_clock(self):
         # doesn't work because call to async wait method without await means it won't be run
         # is there a way to see which futures are doing nothing and assert failure?
@@ -108,6 +105,29 @@ class WhenSimulatingCashFlows():
             yield 'hello mum'
         sim = Simulation(badly_written_generator, start_date=date(2019, 6, 1), end_date=date(2030, 6, 1))
         with expect.raises(InvalidCashFlowYielded):
+            sim.run()
+
+    def should_enforce_time_moves_only_forward(self):
+        async def first(sim):
+            yield sim.cf(100, 'A', 'B', 'Meh')
+            await sim.clock.until(date(2010, 1,1))
+        sim = Simulation(first, start_date=date(2019, 6, 1), end_date=date(2030, 6, 1), accts=dict(A=0, B=0))
+        with expect.raises(InvalidWaitTime):
+            sim.run()
+
+    def should_check_generators_are_sync(self):
+        def badly_written_generator(sim):
+            yield sim.cf(100, 'A', 'B', 'ok')
+        sim = Simulation(badly_written_generator, start_date=date(2025, 8, 27), accts=dict(A=0, B=0))
+        with expect.raises(InvalidGenerator):
+            sim.run()
+
+    def should_enforce_cashflows_are_yielded(self):
+        async def badly_written_generator(sim):
+            yield sim.cf(100, 'A', 'B', 'ok')
+            sim.cf(100, 'A', 'B', 'nok')
+        sim = Simulation(badly_written_generator, start_date=date(2025, 8, 27), accts=dict(A=0, B=0))
+        with expect.raises(FailedToYieldCashFlow):
             sim.run()
 
 
