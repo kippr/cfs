@@ -32,7 +32,8 @@ class Account:
     name: str
     initial: float = 0.0
     description: str = None
-    type: AcctType = AcctType.ASSET
+    type: AcctType = None
+    category: str = None
 
 
 class Simulation(object):
@@ -117,7 +118,7 @@ class Simulation(object):
                     elif isinstance(cf, CashFlow):
                         g.simctx._cf_was_yielded()
                         cf = self.accts._assert_accounts_are_valid(cf)
-                        g.logger.info('Transfer %s from %s to %s: "%s"', cf.amount, cf.from_acct, cf.to_acct, cf.description)
+                        g.logger.trace('Transfer %s from %s to %s: "%s"', cf.amount, cf.from_acct, cf.to_acct, cf.description)
                         yield cf
                     else:
                         msg = f'Expected a cashflow (amount, from, to, description) but got "{cf}"'
@@ -143,7 +144,7 @@ class Simulation(object):
             elif self.current_period > self.end_date:
                 raise StopSimulation("Advanced past *last* period (%s), stopping", self.end_date)
             else:
-                self.logger.info("Advancing to %s", self.current_period)
+                self.logger.debug("Advancing to %s", self.current_period)
             return True
 
     def run(self):
@@ -277,8 +278,11 @@ class Clock(object):
 
     @waiting_for.setter
     def waiting_for(self, waiting_for):
+        #kp: todo: consider asserting this only when it is awaited?
+        # should be easy and avoids clock having to use temp vars below in `until_day`
         if waiting_for < self.current_period:
             msg = f'Requesting wait until {waiting_for}, but that has already passed; currently at {self.current_period}'
+            self.logger.error(msg)
             raise InvalidWaitTime(msg)
         self._waiting_for = waiting_for
 
@@ -307,6 +311,21 @@ class Clock(object):
             self.waiting_for = datetime.date(self.current_period.year + 1, 12, 31)
         yield WAITING
 
+    @enforce_awaited
+    @types.coroutine
+    def until_day(self, day):
+        waiting_for = datetime.date(self.current_period.year, self.current_period.month, day)
+        if waiting_for <= self.current_period:
+            month = self.current_period.month + 1
+            year = self.current_period.year
+            if month > 12:
+                month = 1
+                year += 1
+            waiting_for = datetime.date(year, month, day)
+        self.waiting_for = waiting_for
+        yield WAITING
+
+
     def _wait_was_awaited(self):
         self._awaiting_clock_wait = False
 
@@ -331,14 +350,16 @@ class Accounts():
     def _prepare(self, start_date):
         initial_cfs = [CashFlow(0, start_date, acct.initial or 0, INITIAL, acct.name, INITIAL_BALANCE_DESCRIPTION) 
             for acct in self._accounts.values()]
+        if INITIAL not in self._accounts:
+            self.add(INITIAL, category='External', type=AcctType.EQUITY)
         self._journals = JournalEntries(initial_cfs)
 
-    def add(self, name=None, initial=0.0, description=None, type=AcctType.ASSET):
+    def add(self, name=None, initial=0.0, description=None, type=None, category=None):
         if not name:
             raise ValueError("Account name is required")
         if name in self._accounts:
             raise ValueError(f"Account '{name}' already exists")
-        acct = Account(name=name, initial=initial, description=description, type=type)
+        acct = Account(name=name, initial=initial, description=description, type=type, category=None)
         self._accounts[name] = acct
         return acct
 
