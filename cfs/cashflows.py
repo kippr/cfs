@@ -35,18 +35,27 @@ def amortizing_loan(principal=None, rate=None, years=None, amort_years=None,
 def bv_corp_tax(income_acct, tax_acct, retained_earnings_acct):
     """ Generate cashflows that take all BV income from income_acct for a year and calculate tax_acct  vs
     retained_earnings_acct split """
-    async def bv_corp_tax(clock, balances):
+    threshold = 200_000.
+    low_rate = 0.19
+    high_rate = 0.258
+    async def bv_corp_tax(sim):
         while True:
-            await clock.next_calendar_year_end()
-            annual_income = balances[income_acct]
+            await sim.clock.next_calendar_year_end()
+            annual_income = sim.accts.sum([income_acct])
+            retained_earnings = 0
+            high_tax = 0
             if annual_income:
-                if annual_income > 200000:
-                    higher_rate_amount = annual_income - 200000
-                    yield higher_rate_amount * 0.25, income_acct, tax_acct, '25% Corp Income Tax'
-                    yield higher_rate_amount * 0.75, income_acct, retained_earnings_acct, 'BV Retained Earnings (after 25% corp tax)'
-                lower_rate_amount = min(annual_income, 200000)
-                yield lower_rate_amount * 0.2, income_acct, tax_acct, '20% Corp Income Tax'
-                yield lower_rate_amount * 0.8, income_acct, retained_earnings_acct, 'BV Retained Earnings (after 20% corp tax)'
+                if annual_income > threshold:
+                    higher_rate_amount = annual_income - threshold
+                    high_tax = higher_rate_amount * high_rate
+                    retained_earnings = higher_rate_amount - high_tax
+                    yield sim.cf(high_tax, income_acct, tax_acct, f'{high_rate:.1%} Corp Income Tax on {higher_rate_amount}')
+                lower_rate_amount = min(annual_income, threshold)
+                low_tax = lower_rate_amount * low_rate
+                retained_earnings += lower_rate_amount - low_tax
+                yield sim.cf(low_tax, income_acct, tax_acct, f'{low_rate:.1%} Corp Income Tax on {lower_rate_amount}')
+                yield sim.cf(retained_earnings, income_acct, retained_earnings_acct, 'BV Retained Earnings')
+                assert retained_earnings + low_tax + high_tax == annual_income
     yield bv_corp_tax
 
 
