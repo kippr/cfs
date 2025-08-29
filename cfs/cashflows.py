@@ -1,4 +1,5 @@
 import numpy as np
+import numpy_financial as npf
 
 import logging
 logger = logging.getLogger('cashflows')
@@ -7,27 +8,27 @@ logger = logging.getLogger('cashflows')
 def amortizing_loan(principal=None, rate=None, years=None, amort_years=None,
                     payment_acct=None, principal_acct=None, interest_acct=None):
     periods = np.arange(amort_years) + 1
-    amort_schedule = np.ppmt(rate, periods, amort_years, principal) * -1
-    int_schedule = np.ipmt(rate, periods, amort_years, principal) * -1
+    amort_schedule = npf.ppmt(rate, periods, amort_years, principal) * -1
+    int_schedule = npf.ipmt(rate, periods, amort_years, principal) * -1
 
-    async def amortizing_loan_principal_cfs(clock, balances):
+    async def amortizing_loan_principal_cfs(sim):
         yield sim.cf(principal, principal_acct, payment_acct, 'Initial loan draw')
-        await clock.tick(years=1, days=-1)
+        await sim.clock.tick(years=1, days=-1)
         for period in range(years - 1):
             amortization_payment = amort_schedule[period]
-            yield amortization_payment, payment_acct, principal_acct, 'Amortization payment'
-            await clock.tick(years=1)
+            yield sim.cf(amortization_payment, payment_acct, principal_acct, 'Amortization payment')
+            await sim.clock.tick(years=1)
         amortization_payment = amort_schedule[period + 1]
         yield sim.cf(amortization_payment, payment_acct, principal_acct, 'Amortization payment')
-        await clock.tick(days=1)
+        await sim.clock.tick(days=1)
         yield sim.cf(balances[principal_acct] * -1, payment_acct, principal_acct, 'Paydown')
 
-    async def amortizing_loan_interest_cfs(clock, balances):
-        await clock.tick(years=1, days=-1)
+    async def amortizing_loan_interest_cfs(sim):
+        await sim.clock.tick(years=1, days=-1)
         for period in range(years):
             interest_payment = int_schedule[period]
             yield sim.cf(interest_payment, payment_acct, interest_acct, 'Interest payment')
-            await clock.tick(years=1)
+            await sim.clock.tick(years=1)
     yield amortizing_loan_principal_cfs
     yield amortizing_loan_interest_cfs
 
