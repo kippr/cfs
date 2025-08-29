@@ -5,32 +5,33 @@ import logging
 logger = logging.getLogger('cashflows')
 
 
-def amortizing_loan(principal=None, rate=None, years=None, amort_years=None,
+def amortizing_loan(principal=None, rate=None, years=None,
                     payment_acct=None, principal_acct=None, interest_acct=None):
-    periods = np.arange(amort_years) + 1
-    amort_schedule = npf.ppmt(rate, periods, amort_years, principal) * -1
-    int_schedule = npf.ipmt(rate, periods, amort_years, principal) * -1
+    # kp: todo: this leads to different total interest than using years, given amort happens over whole year
+    monthly_rate = rate / 12
+    months = years * 12
+    periods = np.arange(months) + 1
+    amort_schedule = npf.ppmt(monthly_rate, periods, months, principal) * -1
+    int_schedule = npf.ipmt(monthly_rate, periods, months, principal) * -1
 
-    async def amortizing_loan_principal_cfs(sim):
+    async def amortizing_loan_cfs(sim):
         yield sim.cf(principal, principal_acct, payment_acct, 'Initial loan draw')
-        await sim.clock.tick(years=1, days=-1)
-        for period in range(years - 1):
+        await sim.clock.tick(months=1, days=-1)
+        for period in range(months):
+            if sim.accts.current_balances[principal_acct.name] >= 0:
+                sim.logger.info('Loan fully paid off: stopping payments')
+                return
             amortization_payment = amort_schedule[period]
-            yield sim.cf(amortization_payment, payment_acct, principal_acct, 'Amortization payment')
-            await sim.clock.tick(years=1)
-        amortization_payment = amort_schedule[period + 1]
-        yield sim.cf(amortization_payment, payment_acct, principal_acct, 'Amortization payment')
+            yield sim.cf(amortization_payment, payment_acct, principal_acct, f'Amortization payment for period {period+1}/ {months}')
+
+            interest_payment = int_schedule[period]
+            yield sim.cf(interest_payment, payment_acct, interest_acct, f'Interest payment for period {period+1}/ {months}')
+
+            await sim.clock.tick(months=1)
         await sim.clock.tick(days=1)
         yield sim.cf(balances[principal_acct] * -1, payment_acct, principal_acct, 'Paydown')
 
-    async def amortizing_loan_interest_cfs(sim):
-        await sim.clock.tick(years=1, days=-1)
-        for period in range(years):
-            interest_payment = int_schedule[period]
-            yield sim.cf(interest_payment, payment_acct, interest_acct, 'Interest payment')
-            await sim.clock.tick(years=1)
-    yield amortizing_loan_principal_cfs
-    yield amortizing_loan_interest_cfs
+    yield amortizing_loan_cfs
 
 
 def bv_corp_tax(income_acct, tax_acct, retained_earnings_acct):
