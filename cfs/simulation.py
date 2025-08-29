@@ -16,7 +16,7 @@ INITIAL = 'initial'
 INITIAL_BALANCE_DESCRIPTION = 'Initial balance'
 
 
-CashFlow = namedtuple('CashFlow', ('txn_id', 'date', 'amount', 'from_acct', 'to_acct', 'description'))
+CashFlow = namedtuple('CashFlow', ('txn_id', 'date', 'amount', 'from_acct', 'to_acct', 'description', 'generator'))
 
 
 class AcctType(Enum):
@@ -86,7 +86,13 @@ class Simulation(object):
                 raise InvalidGenerator(f"Cashflow generator '{cashflow_generator_fn.__name__}' "
                     "is not an async generator function")
             clock = Clock(self, self._logger(cashflow_generator_fn, 'Clock'))
-            simctx = SimContext(self.accts, clock, self.id_fountain, self._logger(cashflow_generator_fn, 'SimContext'))
+            simctx = SimContext(
+                self.accts, 
+                clock, 
+                self.id_fountain, 
+                cashflow_generator_fn,
+                self._logger(cashflow_generator_fn, 'SimContext')
+            )
             iter_cashflows = cashflow_generator_fn(simctx)
             logger = self._logger(cashflow_generator_fn, 'Cashflows')
             yield self.GeneratorState(
@@ -188,10 +194,11 @@ class Simulation(object):
 
 class SimContext:
     
-    def __init__(self, accounts, clock, id_fountain, logger):
+    def __init__(self, accounts, clock, id_fountain, generator, logger):
         self.accts = accounts
         self.clock = clock
         self.id_fountain = id_fountain
+        self.generator = generator.__name__
         self._unyielded_cfs: int = 0
         self.logger = logger
 
@@ -200,7 +207,7 @@ class SimContext:
         txn_id = next(self.id_fountain)
         current_period = self.clock.current_period
         self._unyielded_cfs += 1
-        return CashFlow(txn_id, current_period, amount, src, dst, desc)
+        return CashFlow(txn_id, current_period, amount, src, dst, desc, self.generator)
 
     def _cf_was_yielded(self):
         self._unyielded_cfs -= 1
@@ -348,7 +355,7 @@ class Accounts():
             self._accounts = {}
 
     def _prepare(self, start_date):
-        initial_cfs = [CashFlow(0, start_date, acct.initial or 0, INITIAL, acct.name, INITIAL_BALANCE_DESCRIPTION) 
+        initial_cfs = [CashFlow(0, start_date, acct.initial or 0, INITIAL, acct.name, INITIAL_BALANCE_DESCRIPTION, INITIAL)
             for acct in self._accounts.values()]
         if INITIAL not in self._accounts:
             self.add(INITIAL, category='External', type=AcctType.EQUITY)
@@ -432,7 +439,7 @@ class JournalEntries():
 
 
 def _journals(cfs):
-    return pd.DataFrame(cfs, columns=('txn_id', 'date', 'amount', 'from_acct', 'to_acct', 'description'))
+    return pd.DataFrame(cfs, columns=('txn_id', 'date', 'amount', 'from_acct', 'to_acct', 'description', 'generator'))
 
 
 class SimulationLoggerAdapter(logging.LoggerAdapter):
