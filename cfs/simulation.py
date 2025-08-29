@@ -1,4 +1,6 @@
 from collections import namedtuple
+from dataclasses import dataclass
+from enum import Enum
 import pandas as pd
 import datetime
 from dateutil.relativedelta import relativedelta
@@ -6,8 +8,32 @@ import time
 import types
 import functools
 import logging
+import inspect
 logging.addLevelName(5, 'TRACE')
 logging.TRACE = 5
+WAITING = type("Waiting", (), dict(__repr__=lambda self: "WAITING"))()
+INITIAL = 'initial'
+INITIAL_BALANCE_DESCRIPTION = 'Initial balance'
+
+
+CashFlow = namedtuple('CashFlow', ('txn_id', 'date', 'amount', 'from_acct', 'to_acct', 'description'))
+
+
+class AcctType(Enum):
+    ASSET = 'asset'
+    LIABILITY = 'liability'
+    INCOME = 'income'
+    EXPENSE = 'expense'
+    EQUITY = 'equity'
+
+
+@dataclass
+class Account:
+    name: str
+    initial: float = 0.0
+    description: str = None
+    type: AcctType = None
+    category: str = None
 
 
 class Simulation(object):
@@ -15,37 +41,60 @@ class Simulation(object):
     be nice to look at asyncio to use coroutines to interleave these things rather than magic yield statements
     (and needing to use yield from)?
     """
-    cashflows = None
     id_fountain = None
     last_period = None
+    @dataclass
+    class GeneratorState:
+        generator: any
+        iter_cashflows: any
+        simctx: 'SimContext'
+        logger: 'SimulationLoggerAdapter'
+        async_gen: any = None
 
-    def __init__(self, *cashflow_generators, start_date=None, end_date=None):
+        @property
+        def clock(self):
+            return self.simctx.clock
+
+    def __init__(self, *cashflow_generators, accts=None, start_date=None, end_date=None):
+        if not end_date:
+            end_date = start_date + relativedelta(years=5)
         assert start_date < end_date, 'Start date must be < end_date'
         self.logger = self._logger(self.__class__, 'Main')
         self.start_date, self.current_period, self.end_date = start_date, start_date, end_date
-        # kp: todo: kill cashflow_generators from param list?
+        if not accts or isinstance(accts, dict):
+            accts = Accounts(accts)
+        self.accts = accts
         self.generators = tuple(cashflow_generators)
 
     def add(self, *cashflow_generators):
         self.generators = self.generators + tuple(cashflow_generators)
+        return self
 
     def _prepare_run(self):
-        if self.cashflows is not None:
+        if self.id_fountain is not None:
             raise GeneratorExhausted("Simulation already run?")
-        self.cashflows = cashflows_df([])
-        self.id_fountain = iter(range(10000000000))
+        self.id_fountain = iter(range(1, 10000000000))
+        self.accts._prepare(self.start_date)
         self.last_period = False
         self.generators = tuple(self._setup_generators())
         self.logger.info("Initialized cashflow generators: %s",
                          [f'{g.generator.__name__}' for g in self.generators])
 
     def _setup_generators(self):
-        for cashflow_generator in self.generators:
-            clock = Clock(self, cashflow_generator)
-            balances = Balances(self, generator_name=cashflow_generator.__name__)
-            iter_cashflows = cashflow_generator(clock, balances)
-            logger = self._logger(cashflow_generator, 'Cashflows')
-            yield GeneratorAttributes(cashflow_generator, iter_cashflows, clock, balances, logger)
+        for cashflow_generator_fn in self.generators:
+            if not inspect.isasyncgenfunction(cashflow_generator_fn):
+                raise InvalidGenerator(f"Cashflow generator '{cashflow_generator_fn.__name__}' "
+                    "is not an async generator function")
+            clock = Clock(self, self._logger(cashflow_generator_fn, 'Clock'))
+            simctx = SimContext(self.accts, clock, self.id_fountain, self._logger(cashflow_generator_fn, 'SimContext'))
+            iter_cashflows = cashflow_generator_fn(simctx)
+            logger = self._logger(cashflow_generator_fn, 'Cashflows')
+            yield self.GeneratorState(
+                generator=cashflow_generator_fn,
+                iter_cashflows=iter_cashflows,
+                logger=logger,
+                simctx=simctx,
+            )
 
     def _logger(self, generator, label):
         logger = logging.getLogger(f'{generator.__name__}:{label}')
@@ -55,28 +104,28 @@ class Simulation(object):
         for g in self.generators[:]:
             if g.clock.ready:
                 try:
-                    cf = _next(g.iter_cashflows)
+                    cf = _next(g)
                 except GeneratorExhausted:
                     g.logger.info("Exhausted.. removing.")
                     self.generators = tuple(x for x in self.generators if g != x)
+                    g.simctx.close()
                 except NotReadyAfterAll:
                     g.logger.debug("No cfs yet after all.. Two awaits in a row.")
                 else:
                     if cf == WAITING:
                         g.clock._wait_was_awaited()
                         g.logger.trace('will wait until %s', g.clock.waiting_for)
-                    elif isinstance(cf, (list, tuple)) and len(cf) == 4:
-                        g.clock._cf_was_yielded()
-                        amount, from_acct, to_acct, description = cf
-                        g.logger.info('Transfer %s from %s to %s: "%s"', cf[0], cf[1], cf[2], cf[3])
-                        txn_id = next(self.id_fountain)
-                        yield txn_id, self.current_period, from_acct, to_acct, amount, description
+                    elif isinstance(cf, CashFlow):
+                        g.simctx._cf_was_yielded()
+                        cf = self.accts._assert_accounts_are_valid(cf)
+                        g.logger.trace('Transfer %s from %s to %s: "%s"', cf.amount, cf.from_acct, cf.to_acct, cf.description)
+                        yield cf
                     else:
                         msg = f'Expected a cashflow (amount, from, to, description) but got "{cf}"'
                         g.logger.error(msg)
                         raise InvalidCashFlowYielded(msg)
 
-    def _advance_period(self, must_advance):
+    def _maybe_advance_period(self, must_advance):
         if not self.generators:
             raise StopSimulation('All cashflow generators exhausted. Stopping simulation')
         new_period = min((g.clock.waiting_for for g in self.generators if g.clock.waiting_for))
@@ -84,6 +133,7 @@ class Simulation(object):
             raise StopSimulation( "No cashflows this period and no generator waiting for future period.. stopping early")
         if self.current_period == new_period:
             self.logger.trace("Staying on %s to check for more cashflows", self.current_period)
+            return False
         else:
             if self.last_period:
                 raise StopSimulation("Was on last period and advance requested: stopping.")
@@ -94,45 +144,29 @@ class Simulation(object):
             elif self.current_period > self.end_date:
                 raise StopSimulation("Advanced past *last* period (%s), stopping", self.end_date)
             else:
-                self.logger.info("Advancing to %s", self.current_period)
-
-    @property
-    def current_balances(self):
-        cf = self._exploded_cashflows
-        if self.current_period:
-            cf = cf.loc[cf['date'] < self.current_period]
-        return cf.groupby('acct')['amount'].sum()
-
-    @property
-    def balances(self):
-        bals = self._exploded_cashflows[['date', 'acct', 'amount']].groupby(['date', 'acct'])
-        return bals.sum().unstack().fillna(0).cumsum()['amount']
+                self.logger.debug("Advancing to %s", self.current_period)
+            return True
 
     def run(self):
         self._prepare_run()
+        cfs_for_period = []
         while True:
-            period_cashflows = cashflows_df(self._period_cashflows())
-            must_advance = len(period_cashflows) == 0
-            self._append_cashflows(period_cashflows)
+            for cf in self._period_cashflows():
+                cfs_for_period.append(cf)
             try:
-                self._advance_period(must_advance)
+                period_advanced = self._maybe_advance_period(must_advance=not cfs_for_period)
             except StopSimulation as e:
+                self.accts.append(cfs_for_period)
                 self.logger.info(str(e))
                 self.current_period = None
+                for g in self.generators[:]:
+                    g.simctx.close()
                 break
+            else:
+                if period_advanced:
+                    self.accts.append(cfs_for_period)
+                    cfs_for_period = []
         return self
-
-    def _append_cashflows(self, period_cashflows):
-        self.cashflows = pd.concat([self.cashflows, period_cashflows])
-
-    @property
-    def _exploded_cashflows(self):
-        from_cf = self.cashflows[['date', 'from_acct', 'amount']].copy()
-        from_cf['amount'] = from_cf['amount'] * -1
-        from_cf.columns = ['date', 'acct', 'amount']
-        to_cf = self.cashflows[['date', 'to_acct', 'amount']]
-        to_cf.columns = ['date', 'acct', 'amount']
-        return pd.concat([from_cf, to_cf])
 
     def to_excel(self, filename):
         """ Write data that can be consumed by cashflows-viz.twb """
@@ -152,15 +186,50 @@ class Simulation(object):
         writer.save()
 
 
-def _next(iter_cashflows):
+class SimContext:
+    
+    def __init__(self, accounts, clock, id_fountain, logger):
+        self.accts = accounts
+        self.clock = clock
+        self.id_fountain = id_fountain
+        self._unyielded_cfs: int = 0
+        self.logger = logger
+
+    def cf(self, amount, src, dst, desc=None):
+        """Create a cashflow"""
+        txn_id = next(self.id_fountain)
+        current_period = self.clock.current_period
+        self._unyielded_cfs += 1
+        return CashFlow(txn_id, current_period, amount, src, dst, desc)
+
+    def _cf_was_yielded(self):
+        self._unyielded_cfs -= 1
+        self.clock._cf_was_yielded()
+
+    def close(self):
+        self._assert_all_cfs_yielded()
+        self.id_fountain = None
+        self.clock = None
+        self.accts = None
+
+    def _assert_all_cfs_yielded(self):
+        if self._unyielded_cfs > 0:
+            msg = f"{self._unyielded_cfs} unyielded cashflow(s) remaining when generator ended"
+            self.logger.error(msg)
+            raise FailedToYieldCashFlow(msg)
+
+
+def _next(state):
     # grab the next cash flow from the async generator or else a clock waiting event
     try:
-        generator = iter_cashflows.__anext__()
+        if state.async_gen is None:
+            state.async_gen = state.iter_cashflows.__anext__()
     except AttributeError as e:
         raise NotReadyAfterAll()
     try:
-        waiting = generator.send(None)
+        waiting = state.async_gen.send(None)
     except StopIteration as si:
+        state.async_gen = None
         return si.value
     except StopAsyncIteration as sai:
         raise GeneratorExhausted()
@@ -178,11 +247,12 @@ def enforce_awaited(wrapped):
 
 class Clock(object):
 
-    def __init__(self, simulation, generator):
+    def __init__(self, simulation, clock_logger):
         self.simulation = simulation
         self._waiting_for = simulation.start_date
-        self.logger = simulation._logger(generator, 'Clock')
+        self.logger = clock_logger
         self._awaiting_clock_wait = False
+        self._unyielded_cfs = 0
 
     @property
     def current_period(self):
@@ -208,8 +278,11 @@ class Clock(object):
 
     @waiting_for.setter
     def waiting_for(self, waiting_for):
+        #kp: todo: consider asserting this only when it is awaited?
+        # should be easy and avoids clock having to use temp vars below in `until_day`
         if waiting_for < self.current_period:
             msg = f'Requesting wait until {waiting_for}, but that has already passed; currently at {self.current_period}'
+            self.logger.error(msg)
             raise InvalidWaitTime(msg)
         self._waiting_for = waiting_for
 
@@ -238,6 +311,21 @@ class Clock(object):
             self.waiting_for = datetime.date(self.current_period.year + 1, 12, 31)
         yield WAITING
 
+    @enforce_awaited
+    @types.coroutine
+    def until_day(self, day):
+        waiting_for = datetime.date(self.current_period.year, self.current_period.month, day)
+        if waiting_for <= self.current_period:
+            month = self.current_period.month + 1
+            year = self.current_period.year
+            if month > 12:
+                month = 1
+                year += 1
+            waiting_for = datetime.date(year, month, day)
+        self.waiting_for = waiting_for
+        yield WAITING
+
+
     def _wait_was_awaited(self):
         self._awaiting_clock_wait = False
 
@@ -249,78 +337,102 @@ class Clock(object):
             raise FailedToAwaitClock(msg)
 
 
+class Accounts():
 
-def assert_accounts(*registered_accounts):
-    """ This decorator can be added to your cash flow generators to assert they only access accounts specifically
-    registered. This can help prevent bugs.
-    """
-    def decorator(func):
-        @functools.wraps(func)
-        async def assert_account_access(clock, balances, **kargs):
-            strict_balances = StrictBalances(registered_accounts, balances)
-            async for cf in func(clock, strict_balances):
-                # kp: todo: don't like this here and in main loop.. better way? yield something meaningful?
-                if isinstance(cf, (list, tuple)) and len(cf) == 4:
-                    amount, from_acct, to_acct, description = cf
-                    strict_balances._assert_accts_known(from_acct, to_acct)
-                yield cf
-        return assert_account_access
-    return decorator
+    def __init__(self, accts=None):
+        """Hold the accounts for a sim.. Accounts can be created as a dict of name:initial_balance,
+        or using the `add(<details>)` method"""
+        if accts:
+            self._accounts = {k: Account(name=k, initial=v) for k, v in accts.items()}
+        else:
+            self._accounts = {}
 
+    def _prepare(self, start_date):
+        initial_cfs = [CashFlow(0, start_date, acct.initial or 0, INITIAL, acct.name, INITIAL_BALANCE_DESCRIPTION) 
+            for acct in self._accounts.values()]
+        if INITIAL not in self._accounts:
+            self.add(INITIAL, category='External', type=AcctType.EQUITY)
+        self._journals = JournalEntries(initial_cfs)
 
-class StrictBalances(object):
+    def add(self, name=None, initial=0.0, description=None, type=None, category=None):
+        if not name:
+            raise ValueError("Account name is required")
+        if name in self._accounts:
+            raise ValueError(f"Account '{name}' already exists")
+        acct = Account(name=name, initial=initial, description=description, type=type, category=None)
+        self._accounts[name] = acct
+        return acct
 
-    def __init__(self, registered_accounts, balances):
-        self.registered_accounts = registered_accounts
-        self.balances = balances
-
-    def __getitem__(self, acct):
-        self._assert_accts_known(acct)
-        return self.balances[acct]
-
-    def sum(self, accts):
-        self._assert_accts_known(*accts)
-        return self.balances.sum(accts)
-
-    def _assert_accts_known(self, *accounts_to_check):
-        for acct in accounts_to_check:
-            if acct not in self.registered_accounts:
-                raise InvalidAccount(f"'{acct}' not pre-registered with generator '{self.generator_name}'. Registered: '{self.registered_accounts}'")
+    def append(self, period_cashflows):
+        cfs = list(period_cashflows)
+        if cfs:
+            self._journals._append_cashflows(cfs)
+        return bool(cfs)
 
     @property
-    def generator_name(self):
-        return self.balances.generator_name
+    def current_balances(self):
+        cf = self._journals.postings
+        return cf.groupby('acct')['amount'].sum()
+
+    @property
+    def balances_by_date(self):
+        # kp: todo: what should this be called?
+        bals = self._journals.postings[['date', 'acct', 'amount']].groupby(['date', 'acct'])
+        return bals.sum().unstack().infer_objects().fillna(0).cumsum()['amount']
+
+    @property
+    def journals(self):
+        return self._journals.journals.set_index('txn_id').sort_index()
+
+    @property
+    def postings(self):
+        return self._journals.postings.sort_values('txn_id').set_index('txn_id')
+
+    def sum(self, accts):
+        accts = [a.name if isinstance(a, Account) else a for a in accts]
+        bals = self.current_balances
+        return self.current_balances.loc[accts].sum()
 
     @property
     def accounts(self):
-        return self.balances.accounts
+        return self._accounts.values()
 
 
-class Balances(object):
+    def _assert_accounts_are_valid(self, cf):
+        if isinstance(cf.from_acct, Account):
+            cf = cf._replace(from_acct=cf.from_acct.name)
+        if isinstance(cf.to_acct, Account):
+            cf = cf._replace(to_acct=cf.to_acct.name)
+        if cf.from_acct not in self._accounts:
+            msg = f'Cashflow from account "{cf.from_acct}" is not a registered account: {self._accounts}'
+            raise InvalidAccount(msg)
+        if cf.to_acct not in self._accounts:
+            msg = f'Cashflow to account "{cf.to_acct}" is not a registered account: {self._accounts}'
+            raise InvalidAccount(msg)
+        return cf
 
-    def __init__(self, simulation, generator_name='unnamed'):
-        self.simulation = simulation
-        self.generator_name = generator_name
 
-    def __getitem__(self, acct):
-        try:
-            return self.simulation.current_balances[acct]
-        except KeyError:
-            return 0
+class JournalEntries():
 
-    def sum(self, accts):
-        try:
-            return self.simulation.current_balances.loc[list(accts)].sum()
-        except KeyError:
-            return 0
+    def __init__(self, initial_cfs):
+        self.journals = _journals(initial_cfs or [])
+
+    def _append_cashflows(self, period_cashflows):
+        period_journals = _journals(period_cashflows)
+        self.journals = pd.concat([self.journals, period_journals])
 
     @property
-    def accounts(self):
-        return self.simulation.current_balances.index.tolist()
+    def postings(self):
+        from_acct = self.journals[['txn_id', 'date', 'from_acct', 'amount', 'description']].copy()
+        from_acct['amount'] = from_acct['amount'] * -1
+        from_acct.columns = ['txn_id', 'date', 'acct', 'amount', 'description']
+        to_acct = self.journals[['txn_id', 'date', 'to_acct', 'amount', 'description']].copy()
+        to_acct.columns = ['txn_id', 'date', 'acct', 'amount', 'description']
+        return pd.concat([from_acct, to_acct]).sort_values(['txn_id', 'acct'])
 
 
-def cashflows_df(cfs):
-    return pd.DataFrame(cfs, columns=('txn_id', 'date', 'from_acct', 'to_acct', 'amount', 'description'))
+def _journals(cfs):
+    return pd.DataFrame(cfs, columns=('txn_id', 'date', 'amount', 'from_acct', 'to_acct', 'description'))
 
 
 class SimulationLoggerAdapter(logging.LoggerAdapter):
@@ -344,6 +456,10 @@ class FailedToAwaitClock(Exception):
     pass
 
 
+class FailedToYieldCashFlow(Exception):
+    pass
+
+
 class GeneratorExhausted(Exception):
     pass
 
@@ -364,7 +480,5 @@ class InvalidAccount(Exception):
     pass
 
 
-GeneratorAttributes = namedtuple('GeneratorAttributes', ('generator', 'iter_cashflows', 'clock', 'balances', 'logger'))
-
-
-WAITING = object()
+class InvalidGenerator(Exception):
+    pass

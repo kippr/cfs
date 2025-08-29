@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cfs"
+version = "0.2.0"
+description = "Simple cashflow simulator"
+authors = [
+  { name = "Kris Powell", email = "github@krispowell.net" }
+]
+readme = "README.md"
+requires-python = ">=3.12"
+
+dependencies = [
+    "numpy-financial>=1.0.0",
+    "pandas==2.3.2",
+]
+
+[project.optional-dependencies]
+test = [
+    "expecter==0.3.0",
+    "pytest==8.4.1",
+]
+
+[dependency-groups]
+dev = [
+    "ipdb>=0.13.13",
+]
+

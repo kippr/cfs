@@ -1,21 +1,36 @@
 import unittest
 from expecter import expect
 from datetime import date
-from cfs.simulation import Simulation
-from cfs.cashflows import box_3_tax, initial, INITIAL_BALANCE_DESCRIPTION
+from cfs.simulation import Simulation, Accounts, AcctType
+from cfs.cashflows import box_3_tax 
 
 
-class WhenGeneratingCashflows(unittest.TestCase):
-
-    def first_non_initial_cf(self, test_generator,
-                             initial_cfs=((100000, 'starting', 'cash'), (50000, 'starting', 'investments'))):
-        sim = Simulation(start_date=date(2019, 1, 1), end_date=date(2020, 1, 1))
-        sim.add(*initial(initial_cfs))
-        sim.add(*test_generator)
-        sim.run()
-        return next(x for x in sim.cashflows.itertuples() if x.description != INITIAL_BALANCE_DESCRIPTION)
+class WhenGeneratingCashflows():
 
     def should_calc_box_3_as_30_percent_of_4_percent(self):
         box_3 = box_3_tax(('cash', 'investments'), 'cash', 'tax')
-        cf = self.first_non_initial_cf(box_3)
-        expect(cf.amount) == 150000 * 1.2 / 100
+        accts = dict(
+            cash=100000,
+            investments=50000,
+            tax=0,
+        )
+        sim = Simulation(accts=accts, start_date=date(2019, 1, 1), end_date=date(2020, 1, 1)).add(*box_3).run()
+        expect(sim.accts.current_balances['tax']) == 150000 * (1.2 / 100)
+        print("=== JOURNALS ===")
+        print(sim.accts.journals)
+        print("=== POSTINGS ===")
+        print(sim.accts.postings)
+        print("=== BALANCES THRU TIME ===")
+        print(sim.accts.balances_by_date)
+        print("=== FINAL BALANCES ===")
+        print(sim.accts.current_balances)
+
+    def should_also_be_able_to_use_richer_acct_data(self):
+        accts = Accounts()
+        cash = accts.add(name='cash', initial=100000, type=AcctType.ASSET)
+        investments = accts.add(name='investments', initial=50000, type=AcctType.ASSET)
+        tax = accts.add(name='tax', initial=0, type=AcctType.EXPENSE)
+
+        box_3 = box_3_tax((cash, investments), cash, tax)
+        sim = Simulation(accts=accts, start_date=date(2019, 1, 1), end_date=date(2020, 1, 1)).add(*box_3).run()
+        expect(sim.accts.current_balances['tax']) == 150000 * (1.2 / 100)
