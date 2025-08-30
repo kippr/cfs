@@ -34,6 +34,48 @@ def amortizing_loan(principal=None, rate=None, years=None,
     yield amortizing_loan_cfs
 
 
+def interest_only_loan(principal=None, rate=None, payment_acct=None, principal_acct=None, interest_acct=None):
+    assert principal
+    assert rate
+    assert payment_acct
+    assert principal_acct
+    assert interest_acct
+    monthly_rate = rate / 12.
+
+    async def interest_only_loan_payment(sim):
+        yield sim.cf(principal, principal_acct, payment_acct, 'Initial loan draw')
+        await sim.clock.tick(months=1, days=-1)
+        while True:
+            bal = sim.accts.sum([principal_acct]) * -1
+            if bal <= 0:
+                sim.logger.info(f"Loan paid off, stopping interest payments")
+                return
+            interest = monthly_rate * bal
+            yield sim.cf(interest, src=payment_acct, dst=interest_acct, desc=f'Monthly interest-only payment: {monthly_rate:.2%} x {bal}')
+            await sim.clock.tick(months=1)
+    yield interest_only_loan_payment
+
+
+def fire_income(annual_rate=4.0, personal_acct=None, investment_accts=None, blackhole_acct=None):
+    assert personal_acct
+    assert investment_accts
+    assert blackhole_acct
+
+    async def fire_investment_income(sim):
+        # figure this out at start I think and keeps it constant?
+        capital = sim.accts.sum(investment_accts)
+        assert capital
+        annual_withdrawal = annual_rate / 100. * capital
+        monthly_withdrawal = annual_withdrawal / 12.
+
+        sim.logger.info(f"Capital: {capital}; annual %: {annual_rate}; annual withdrawal: {annual_withdrawal}; monthly: {monthly_withdrawal}")
+        await sim.clock.until_day(15)
+        while True:
+            yield sim.cf(monthly_withdrawal, src=blackhole_acct, dst=personal_acct, desc='Monthly FIRE withdrawal')
+            await sim.clock.tick(months=1)
+    yield fire_investment_income
+
+
 def bv_corp_tax(income_acct, tax_acct, retained_earnings_acct):
     """ Generate cashflows that take all BV income from income_acct for a year and calculate tax_acct  vs
     retained_earnings_acct split """
