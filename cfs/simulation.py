@@ -438,7 +438,9 @@ class JournalEntries():
 
 
 def _journals(cfs):
-    return pd.DataFrame(cfs, columns=('txn_id', 'date', 'amount', 'from_acct', 'to_acct', 'description', 'generator'))
+    df = pd.DataFrame(cfs, columns=('txn_id', 'date', 'amount', 'from_acct', 'to_acct', 'description', 'generator'))
+    df['date'] = pd.to_datetime(df['date'])
+    return df
 
 
 class SimulationLoggerAdapter(logging.LoggerAdapter):
