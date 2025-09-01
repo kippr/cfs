@@ -6,7 +6,17 @@ logger = logging.getLogger('cashflows')
 
 
 def amortizing_loan(principal=None, rate=None, years=None,
-                    payment_acct=None, principal_acct=None, interest_acct=None):
+                    payment_acct=None, loan_acct=None,
+                    principal_acct=None, interest_acct=None):
+    assert principal
+    assert rate
+    assert years
+    assert payment_acct
+    assert principal_acct
+    assert interest_acct
+    if not loan_acct:
+        loan_acct = principal_acct
+
     # kp: todo: this leads to different total interest than using years, given amort happens over whole year
     monthly_rate = rate / 12
     months = years * 12
@@ -15,10 +25,10 @@ def amortizing_loan(principal=None, rate=None, years=None,
     int_schedule = npf.ipmt(monthly_rate, periods, months, principal) * -1
 
     async def amortizing_loan_cfs(sim):
-        yield sim.cf(principal, principal_acct, payment_acct, 'Initial loan draw')
+        yield sim.cf(principal, principal_acct, loan_acct, 'Initial loan draw')
         await sim.clock.tick(months=1, days=-1)
         for period in range(months):
-            if sim.accts.current_balances[principal_acct.name] >= 0:
+            if sim.accts.sum([principal_acct.name]) >= 0:
                 sim.logger.info('Loan fully paid off: stopping payments')
                 return
             amortization_payment = amort_schedule[period]
@@ -34,16 +44,21 @@ def amortizing_loan(principal=None, rate=None, years=None,
     yield amortizing_loan_cfs
 
 
-def interest_only_loan(principal=None, rate=None, payment_acct=None, principal_acct=None, interest_acct=None):
+def interest_only_loan(principal=None, rate=None, 
+                       payment_acct=None, loan_acct=None,
+                       principal_acct=None, interest_acct=None):
     assert principal
     assert rate
     assert payment_acct
     assert principal_acct
     assert interest_acct
+    if not loan_acct:
+        loan_acct = principal_acct
+
     monthly_rate = rate / 12.
 
     async def interest_only_loan_payment(sim):
-        yield sim.cf(principal, principal_acct, payment_acct, 'Initial loan draw')
+        yield sim.cf(principal, principal_acct, loan_acct, 'Initial loan draw')
         await sim.clock.tick(months=1, days=-1)
         while True:
             bal = sim.accts.sum([principal_acct]) * -1

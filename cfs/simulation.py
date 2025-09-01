@@ -404,7 +404,6 @@ class Accounts():
     def accounts(self):
         return self._accounts.values()
 
-
     def _assert_accounts_are_valid(self, cf):
         if isinstance(cf.from_acct, Account):
             cf = cf._replace(from_acct=cf.from_acct.name)
