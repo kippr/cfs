@@ -156,3 +156,13 @@ def box_3_tax(net_worth_accts_or_filter, pers_cash_act, pers_tax_acct):
             if net_worth and net_worth > 0:
                 yield sim.cf(net_worth * 0.3 * 0.04, pers_cash_act, pers_tax_acct, f'Box 3 payment on net worth of {net_worth:.2f}')
     yield box_3_tax
+
+
+def ad_hoc_cfs(cashflows=()):
+    assert cashflows
+
+    async def ad_hoc_cashflows(sim):
+        for cf_date, amount, from_acct, to_acct, desc in cashflows:
+            await sim.clock.until(cf_date)
+            yield sim.cf(amount, src=from_acct, dst=to_acct, desc=desc)
+    yield ad_hoc_cashflows
