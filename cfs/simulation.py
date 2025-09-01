@@ -429,11 +429,11 @@ class JournalEntries():
 
     @property
     def postings(self):
-        from_acct = self.journals[['txn_id', 'date', 'from_acct', 'amount', 'description']].copy()
+        from_acct = self.journals[['txn_id', 'date', 'from_acct', 'amount', 'description', 'generator']].copy()
         from_acct['amount'] = from_acct['amount'] * -1
-        from_acct.columns = ['txn_id', 'date', 'acct', 'amount', 'description']
-        to_acct = self.journals[['txn_id', 'date', 'to_acct', 'amount', 'description']].copy()
-        to_acct.columns = ['txn_id', 'date', 'acct', 'amount', 'description']
+        from_acct.columns = ['txn_id', 'date', 'acct', 'amount', 'description', 'generator']
+        to_acct = self.journals[['txn_id', 'date', 'to_acct', 'amount', 'description', 'generator']].copy()
+        to_acct.columns = ['txn_id', 'date', 'acct', 'amount', 'description', 'generator']
         return pd.concat([from_acct, to_acct]).sort_values(['txn_id', 'acct'])
 
 
