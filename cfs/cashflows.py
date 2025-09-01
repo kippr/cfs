@@ -108,26 +108,39 @@ def bv_corp_tax(income_acct, tax_acct, retained_earnings_acct):
                     higher_rate_amount = annual_income - threshold
                     high_tax = higher_rate_amount * high_rate
                     retained_earnings = higher_rate_amount - high_tax
-                    yield sim.cf(high_tax, income_acct, tax_acct, f'{high_rate:.1%} Corp Income Tax on {higher_rate_amount}')
+                    yield sim.cf(high_tax, income_acct, tax_acct, f'{high_rate:.1%} Corp Income Tax on {higher_rate_amount:.2f}')
                 lower_rate_amount = min(annual_income, threshold)
                 low_tax = lower_rate_amount * low_rate
                 retained_earnings += lower_rate_amount - low_tax
-                yield sim.cf(low_tax, income_acct, tax_acct, f'{low_rate:.1%} Corp Income Tax on {lower_rate_amount}')
+                yield sim.cf(low_tax, income_acct, tax_acct, f'{low_rate:.1%} Corp Income Tax on {lower_rate_amount:.2f}')
                 yield sim.cf(retained_earnings, income_acct, retained_earnings_acct, 'BV Retained Earnings')
                 assert retained_earnings + low_tax + high_tax == annual_income
     yield bv_corp_tax
 
 
-def bv_pay_retained_earnings_as_dividend(retained_earnings_acct, tax_acct, personal_acct):
-    """ Pay all retained earnings out as dividend / tax """
-    async def dividend_sweep(clock, balances):
+def bv_dividend_payment(retained_earnings_acct, tax_acct, personal_acct, max_dividend=None):
+    """ Pay all (or up to `max_dividend`) of retained earnings out as dividend / tax """
+    threshold = 67804*2.
+    low_rate = 0.245
+    high_rate = 0.31
+    async def dividend_payments(sim):
         while True:
-            await clock.next_calendar_year_end()
-            dividend = balances[retained_earnings_acct]
+            await sim.clock.next_calendar_year_end()
+            await sim.clock.tick(days=1)  # ensure after corp tax
+            dividend = sim.accts.sum([retained_earnings_acct])
             if dividend > 0:
-                yield dividend * 0.25 , retained_earnings_acct, tax_acct, 'Dividend payment: tax'
-                yield dividend * 0.75, retained_earnings_acct, personal_acct, 'Dividend payment'
-    yield dividend_sweep
+                if max_dividend:
+                    dividend = min(dividend, max_dividend)
+                high_tax = 0
+                if dividend > threshold:
+                    higher_rate_amount = dividend - threshold
+                    higher_tax = higher_rate_amount * high_rate
+                    yield sim.cf(higher_tax, retained_earnings_acct, tax_acct, f'{high_rate:.1%} Box 2 Dividend Tax on {higher_rate_amount:.2f}')
+                lower_rate_amount = min(dividend, threshold)
+                low_tax = lower_rate_amount * low_rate
+                yield sim.cf(low_tax, retained_earnings_acct, tax_acct, f'{low_rate:.1%} Box 2 Dividend Tax on {lower_rate_amount:.2f}')
+                yield sim.cf(dividend - low_tax - high_tax, retained_earnings_acct, personal_acct, 'Dividend payment')
+    yield dividend_payments
 
 
 def box_3_tax(net_worth_accts_or_filter, pers_cash_act, pers_tax_acct):
