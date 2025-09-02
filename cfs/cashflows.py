@@ -143,7 +143,28 @@ def bv_dividend_payment(retained_earnings_acct, tax_acct, personal_acct, max_div
     yield dividend_payments
 
 
-def box_3_tax(net_worth_accts_or_filter, pers_cash_act, pers_tax_acct):
+def jan_2_cash_sweep(from_acct=None, to_acct=None):
+    """Sweep all cash from from_acct to to_acct on Jan 2 of each year.
+        Jan 2? long story but need live balances before this can be more sensible"""
+    assert from_acct
+    assert to_acct
+
+    async def sweep(sim):
+        await sim.clock.next_calendar_year_end()
+        await sim.clock.tick(days=2)
+        while True:
+            await sim.clock.tick(years=1)
+            balance = sim.accts.sum([from_acct])
+            if balance:
+                yield sim.cf(balance, src=from_acct, dst=to_acct, desc=f"Annual cash sweep to empty {from_acct.name} into {to_acct.name}")
+
+    return sweep
+
+
+def box_3_tax(net_worth_accts_or_filter=None, pers_cash_act=None, pers_tax_acct=None):
+    assert net_worth_accts_or_filter
+    assert pers_cash_act
+    assert pers_tax_acct
     async def box_3_tax(sim):
         while True:
             await sim.clock.next_calendar_year_end()
