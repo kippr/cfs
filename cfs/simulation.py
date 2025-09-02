@@ -351,6 +351,8 @@ class Accounts():
         or using the `add(<details>)` method"""
         if accts:
             self._accounts = {k: Account(name=k, initial=v) for k, v in accts.items()}
+            for a in self._accounts.values():
+                self._add_as_property(a)
         else:
             self._accounts = {}
 
@@ -368,6 +370,7 @@ class Accounts():
             raise ValueError(f"Account '{name}' already exists")
         acct = Account(name=name, initial=initial, description=description, type=type, category=None)
         self._accounts[name] = acct
+        self._add_as_property(acct)
         return acct
 
     def append(self, period_cashflows):
@@ -416,6 +419,15 @@ class Accounts():
             msg = f'Cashflow to account "{cf.to_acct}" is not a registered account: {self._accounts}'
             raise InvalidAccount(msg)
         return cf
+
+    def _add_as_property(self, acct):
+        if hasattr(self, acct.name):
+            raise ValueError(f"Account name '{acct.name}' is already in use")
+        # kp: todo: property getter doesn't  work? get property back that is not evaluated for instances?
+        #def getter(self):
+        #    return self._accounts[acct.name]
+        #setattr(Account, acct.name, property(getter))
+        setattr(self, acct.name, acct)
 
 
 class JournalEntries():
