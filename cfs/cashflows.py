@@ -39,7 +39,6 @@ def amortizing_loan(principal=None, rate=None, years=None,
 
             await sim.clock.tick(months=1)
         await sim.clock.tick(days=1)
-        yield sim.cf(balances[principal_acct] * -1, payment_acct, principal_acct, 'Paydown')
 
     yield amortizing_loan_cfs
 
