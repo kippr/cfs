@@ -1,3 +1,5 @@
+from functools import wraps
+
 import numpy as np
 import numpy_financial as npf
 
@@ -182,3 +184,18 @@ def ad_hoc_cfs(cashflows=()):
             await sim.clock.until(cf_date)
             yield sim.cf(amount, src=from_acct, dst=to_acct, desc=desc)
     yield ad_hoc_cashflows
+
+
+def delayed_start(wrapped, start_date=None, **tick_expressions):
+    """Wait until either start_date xor the result of the tick_expressions before starting the wrapped cashflow generator"""
+    @wraps(wrapped)
+    async def delayed(sim):
+        if start_date and tick_expressions:
+            raise ValueError("Can only specify either start_date or tick_expressions, not both")
+        if start_date:
+            await sim.clock.until(start_date)
+        else:
+            await sim.clock.tick(**tick_expressions)
+        async for cf in wrapped(sim):
+            yield cf
+    return delayed

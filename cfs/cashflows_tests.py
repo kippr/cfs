@@ -3,7 +3,7 @@ import unittest
 from expecter import expect
 from datetime import date
 from cfs.simulation import Simulation, Accounts, AcctType
-from cfs.cashflows import box_3_tax, amortizing_loan
+from cfs.cashflows import box_3_tax, amortizing_loan, delayed_start
 
 
 class WhenGeneratingCashflows():
@@ -58,3 +58,15 @@ class WhenGeneratingCashflows():
         expect(len(sim.accts.balances_by_date.index)) == 1 + 12 # drawdown followed by 12 monthly installments
         expect(round(sim.accts.sum(['payments', 'interest', 'mortgage']), 2)) == 0.0
         expect(round(sim.accts.sum(['interest']), 2)) == 8186.93
+
+
+    def should_be_able_to_delay_start_to_given_date(self):
+        async def ad_hoc(sim):
+            yield sim.cf(100, 'A', 'B', 'Test ad hoc payment')
+            await sim.clock.tick(months=1)
+            yield sim.cf(50, 'A', 'B', 'Test ad hoc payment')
+        double_delayed = delayed_start(delayed_start(ad_hoc, months=1), start_date=date(2020, 2, 1))
+        sim = Simulation(double_delayed, accts=dict(A=0, B=0), start_date=date(2020, 1, 1)).run()
+        expect(sim.accts.balances_by_date.loc[pd.to_datetime(date(2020, 1, 1)), 'B']) == 0
+        expect(sim.accts.balances_by_date.loc[pd.to_datetime(date(2020, 3, 1)), 'B']) == 100
+        expect(sim.accts.balances_by_date.loc[pd.to_datetime(date(2020, 4, 1)), 'B']) == 150
