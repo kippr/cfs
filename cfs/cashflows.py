@@ -16,30 +16,26 @@ def amortizing_loan(principal=None, rate=None, years=None,
     assert interest_acct
     if not loan_acct:
         loan_acct = principal_acct
-
     # kp: todo: this leads to different total interest than using years, given amort happens over whole year
     monthly_rate = rate / 12
-    months = years * 12
-    periods = np.arange(months) + 1
-    amort_schedule = npf.ppmt(monthly_rate, periods, months, principal) * -1
-    int_schedule = npf.ipmt(monthly_rate, periods, months, principal) * -1
+    num_months = years * 12
 
     async def amortizing_loan_cfs(sim):
         yield sim.cf(principal, principal_acct, loan_acct, 'Initial loan draw')
         await sim.clock.tick(months=1, days=-1)
-        for period in range(months):
-            if sim.accts.sum([principal_acct.name]) >= 0:
+        for current_month in range(num_months):
+            months_remaining = num_months - current_month
+            principal_remaining = sim.accts.sum([principal_acct.name])
+            if principal_remaining >= 0:
                 sim.logger.info('Loan fully paid off: stopping payments')
                 return
-            amortization_payment = amort_schedule[period]
-            yield sim.cf(amortization_payment, payment_acct, principal_acct, f'Amortization payment for period {period+1}/ {months}')
-
-            interest_payment = int_schedule[period]
-            yield sim.cf(interest_payment, payment_acct, interest_acct, f'Interest payment for period {period+1}/ {months}')
-
+            amortization_payment = npf.ppmt(monthly_rate, 1, months_remaining, principal_remaining)
+            interest_payment = npf.ipmt(monthly_rate, 1, months_remaining, principal_remaining)
+            yield sim.cf(amortization_payment, payment_acct, principal_acct,
+                         f'Amortization payment for period {current_month+1}/ {num_months}')
+            yield sim.cf(interest_payment, payment_acct, interest_acct,
+                         f'Interest payment for period {current_month+1}/ {num_months}')
             await sim.clock.tick(months=1)
-        await sim.clock.tick(days=1)
-
     yield amortizing_loan_cfs
 
 
