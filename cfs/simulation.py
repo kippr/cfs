@@ -452,6 +452,7 @@ class JournalEntries():
 def _journals(cfs):
     df = pd.DataFrame(cfs, columns=('txn_id', 'date', 'amount', 'from_acct', 'to_acct', 'description', 'generator'))
     df['date'] = pd.to_datetime(df['date'])
+    df['amount'] = df['amount'].astype('float64')
     return df
 
 

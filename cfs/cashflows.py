@@ -111,7 +111,7 @@ def bv_corp_tax(income_acct, tax_acct, retained_earnings_acct):
                 retained_earnings += lower_rate_amount - low_tax
                 yield sim.cf(low_tax, income_acct, tax_acct, f'{low_rate:.1%} Corp Income Tax on {lower_rate_amount:.2f}')
                 yield sim.cf(retained_earnings, income_acct, retained_earnings_acct, 'BV Retained Earnings')
-                assert retained_earnings + low_tax + high_tax == annual_income
+                assert abs(retained_earnings + low_tax + high_tax - annual_income) < 0.01
     yield bv_corp_tax
 
 
